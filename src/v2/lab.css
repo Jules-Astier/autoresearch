@@ -64,6 +64,12 @@
   min-height: 100vh;
 }
 
+html.lab-frontier-scroll-locked,
+body.lab-frontier-scroll-locked {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 .lab-ledger *,
 .lab-ledger *::before,
 .lab-ledger *::after {
@@ -281,6 +287,89 @@
   height: 64px;
 }
 
+/* big interactive chart below the headline */
+.lab-ledger .frontier-chart {
+  margin-top: 22px;
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  background: var(--paper-2);
+  border-radius: var(--r-md);
+  border: 1px solid var(--rule-soft);
+  position: relative;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  touch-action: none;
+}
+.lab-ledger .frontier-chart-controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  gap: 4px;
+  background: var(--paper-1);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-paper);
+  padding: 3px;
+  z-index: 3;
+}
+.lab-ledger .scale-toggle {
+  width: auto !important;
+  padding: 0 8px;
+  font-family: var(--face-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.lab-ledger .scale-toggle.active {
+  background: var(--amber-soft);
+  color: var(--ink-1);
+}
+.lab-ledger .frontier-chart-yaxis {
+  height: 236px;
+  border-right: 1px solid var(--rule-soft);
+  position: relative;
+}
+.lab-ledger .frontier-chart-yaxis svg { display: block; }
+.lab-ledger .frontier-chart-scroll {
+  height: 236px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
+  position: relative;
+  scrollbar-gutter: stable;
+  touch-action: none;
+}
+.lab-ledger .frontier-chart-scroll svg { display: block; }
+.lab-ledger .frontier-chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--ink-1);
+  color: var(--paper-2);
+  font-family: var(--face-mono);
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  white-space: nowrap;
+  z-index: 2;
+  transform: translate(-50%, -120%);
+  box-shadow: var(--shadow-paper);
+}
+.lab-ledger .frontier-chart-tooltip .delta { margin-left: 6px; }
+.lab-ledger .frontier-chart-tooltip .delta.up   { color: #b0d18a; }
+.lab-ledger .frontier-chart-tooltip .delta.down { color: #e7a59a; }
+.lab-ledger .frontier-chart-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  font-family: var(--face-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  border-top: 1px solid var(--rule-soft);
+  grid-column: 1 / -1;
+}
+
 /* ── hypothesis-now ────────────────────────────────────────── */
 .lab-ledger .hypothesis-now {
   margin-top: 20px;
@@ -352,50 +441,89 @@
   color: var(--ink-3);
 }
 
-/* ── lineage canvas ────────────────────────────────────────── */
-.lab-ledger .lineage {
+/* ── lineage canvas (pan/zoom) ─────────────────────────────── */
+.lab-ledger .lineage-canvas {
+  position: relative;
   background: var(--paper-1);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-paper);
-  padding: 24px;
-  overflow: auto;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  user-select: none;
+  touch-action: none;
 }
-.lab-ledger .lineage svg { display: block; }
-.lab-ledger .lineage .node-circle {
-  cursor: pointer;
-  transition: transform 120ms;
-  transform-origin: center;
-}
-.lab-ledger .lineage .node-circle:hover { transform: scale(1.15); }
-.lab-ledger .lineage .node-label {
+.lab-ledger .lineage-canvas .empty { padding: 40px 24px; }
+.lab-ledger .lineage-canvas svg { display: block; background: var(--paper-1); }
+
+.lab-ledger .lineage-canvas .node-label {
   font-family: var(--face-mono);
-  font-size: 12px;
+  font-size: 13px;
   fill: var(--ink-2);
   pointer-events: none;
   font-variant-numeric: tabular-nums;
 }
-.lab-ledger .lineage .node-hyp {
+.lab-ledger .lineage-canvas .node-hyp {
   font-family: var(--face-sans);
   font-size: 13px;
   fill: var(--ink-2);
   pointer-events: none;
 }
-.lab-ledger .lineage .node-hyp.dim { fill: var(--ink-4); }
-.lab-ledger .lineage .branch-tag {
+.lab-ledger .lineage-canvas .node-hyp.dim { fill: var(--sepia); }
+.lab-ledger .lineage-canvas .branch-tag {
   font-family: var(--face-mono);
   font-size: 11px;
-  fill: var(--sepia);
   letter-spacing: 0.04em;
+  pointer-events: none;
+}
+
+/* floating canvas controls */
+.lab-ledger .lineage-controls {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: flex;
+  gap: 4px;
+  background: var(--paper-2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-paper);
+  padding: 3px;
+}
+.lab-ledger .lineage-ctrl {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--ink-2);
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  transition: background 120ms;
+}
+.lab-ledger .lineage-ctrl:hover { background: var(--paper-edge); color: var(--ink-1); }
+
+.lab-ledger .lineage-hint {
+  position: absolute;
+  bottom: 12px;
+  right: 16px;
+  font-size: 11px;
+  color: var(--ink-3);
+  background: var(--paper-2);
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-paper);
+  pointer-events: none;
 }
 
 /* ── ledger journal entries ────────────────────────────────── */
 .lab-ledger .ledger {
-  display: grid;
-  gap: 0;
+  display: block;
   background: var(--paper-1);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-paper);
-  overflow: hidden;
+  overflow-y: auto;
+  max-height: 520px;
 }
 .lab-ledger .ledger-row {
   display: grid;
@@ -896,4 +1024,109 @@
   font-style: italic;
   color: var(--ink-4);
   padding: 18px 22px;
+}
+
+/* ── themed scrollbars ─────────────────────────────────────────
+   Match the paper palette instead of relying on macOS defaults
+   (which render as a heavy black bar in light mode).            */
+.lab-ledger .frontier-chart-scroll,
+.lab-ledger .ledger,
+.lab-ledger .tape,
+.lab-ledger .dialogue,
+.lab-ledger .sheet-body,
+.lab-ledger .modal-body {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sepia-soft) transparent;
+}
+.lab-ledger .frontier-chart-scroll::-webkit-scrollbar,
+.lab-ledger .ledger::-webkit-scrollbar,
+.lab-ledger .tape::-webkit-scrollbar,
+.lab-ledger .dialogue::-webkit-scrollbar,
+.lab-ledger .sheet-body::-webkit-scrollbar,
+.lab-ledger .modal-body::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+.lab-ledger .frontier-chart-scroll::-webkit-scrollbar-track,
+.lab-ledger .ledger::-webkit-scrollbar-track,
+.lab-ledger .tape::-webkit-scrollbar-track,
+.lab-ledger .dialogue::-webkit-scrollbar-track,
+.lab-ledger .sheet-body::-webkit-scrollbar-track,
+.lab-ledger .modal-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.lab-ledger .frontier-chart-scroll::-webkit-scrollbar-thumb,
+.lab-ledger .ledger::-webkit-scrollbar-thumb,
+.lab-ledger .tape::-webkit-scrollbar-thumb,
+.lab-ledger .dialogue::-webkit-scrollbar-thumb,
+.lab-ledger .sheet-body::-webkit-scrollbar-thumb,
+.lab-ledger .modal-body::-webkit-scrollbar-thumb {
+  background-color: var(--sepia-soft);
+  border-radius: 999px;
+  border: 2px solid var(--paper-2);
+}
+.lab-ledger .frontier-chart-scroll::-webkit-scrollbar-thumb:hover,
+.lab-ledger .ledger::-webkit-scrollbar-thumb:hover,
+.lab-ledger .tape::-webkit-scrollbar-thumb:hover,
+.lab-ledger .dialogue::-webkit-scrollbar-thumb:hover,
+.lab-ledger .sheet-body::-webkit-scrollbar-thumb:hover,
+.lab-ledger .modal-body::-webkit-scrollbar-thumb:hover {
+  background-color: var(--sepia);
+}
+.lab-ledger .frontier-chart-scroll::-webkit-scrollbar-corner,
+.lab-ledger .ledger::-webkit-scrollbar-corner,
+.lab-ledger .tape::-webkit-scrollbar-corner,
+.lab-ledger .dialogue::-webkit-scrollbar-corner,
+.lab-ledger .sheet-body::-webkit-scrollbar-corner,
+.lab-ledger .modal-body::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ── lineage canvas legend ─────────────────────────────────── */
+.lab-ledger .lineage-legend {
+  position: absolute;
+  bottom: 12px;
+  left: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 11px;
+  color: var(--ink-3);
+  background: var(--paper-2);
+  padding: 6px 10px;
+  border-radius: var(--r-sm);
+  box-shadow: var(--shadow-paper);
+  pointer-events: none;
+}
+.lab-ledger .lineage-legend .lg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.lab-ledger .lineage-legend .lg i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ink-4);
+  display: inline-block;
+}
+.lab-ledger .lineage-legend .lg-running i {
+  background: var(--amber);
+  box-shadow: 0 0 0 2px var(--amber-glow);
+}
+.lab-ledger .lineage-legend .lg-promoted i  { background: var(--moss); }
+.lab-ledger .lineage-legend .lg-completed i { background: var(--moss-faded); }
+.lab-ledger .lineage-legend .lg-queued i {
+  background: var(--paper-2);
+  border: 1.5px dashed var(--ink-4);
+  width: 9px;
+  height: 9px;
+}
+.lab-ledger .lineage-legend .lg-failed i { background: var(--oxblood); }
+.lab-ledger .lineage-legend .lg-rolled i {
+  background: var(--paper-1);
+  border: 1.5px dashed var(--sepia);
+  width: 9px;
+  height: 9px;
 }

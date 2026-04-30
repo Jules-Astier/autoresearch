@@ -100,7 +100,36 @@ export function LabLedger() {
         ) : (
           <div className="canvas">
             <main>
-              <Frontier session={session} experiments={experiments} />
+              <Toolbar
+                session={session}
+                workerControl={workerControl}
+                onPause={() => void pauseSession({ sessionId: session._id })}
+                onResume={() => void resumeSession({ sessionId: session._id })}
+                onStop={() =>
+                  void stopSession({ sessionId: session._id, reason: "manual_stop" })
+                }
+                onRequestExperiments={(count) =>
+                  void requestMore({ sessionId: session._id, count })
+                }
+                onSetRunners={(count) => {
+                  void setWorkerControl({ desiredRunnerCount: count });
+                  if (count > 0) {
+                    void setSessionConcurrency({
+                      sessionId: session._id,
+                      maxConcurrentRuns: count,
+                    });
+                  }
+                }}
+                onSetPlannerCount={(count) =>
+                  void setWorkerControl({ desiredPlannerCount: count })
+                }
+              />
+
+              <Frontier
+                session={session}
+                experiments={experiments}
+                onSelectExperiment={setSelectedExperimentId}
+              />
               <HypothesisNow activeRun={activeRun} experiment={activeExperiment} />
 
               <section className="section">
@@ -134,28 +163,6 @@ export function LabLedger() {
                   bestMetrics={session.bestMetrics}
                 />
               </section>
-
-              <Toolbar
-                session={session}
-                workerControl={workerControl}
-                onPause={() => void pauseSession({ sessionId: session._id })}
-                onResume={() => void resumeSession({ sessionId: session._id })}
-                onStop={() =>
-                  void stopSession({ sessionId: session._id, reason: "manual_stop" })
-                }
-                onRequestExperiments={(count) =>
-                  void requestMore({ sessionId: session._id, count })
-                }
-                onSetRunners={(count) => {
-                  void setWorkerControl({ desiredRunnerCount: count });
-                  if (count > 0) {
-                    void setSessionConcurrency({
-                      sessionId: session._id,
-                      maxConcurrentRuns: count,
-                    });
-                  }
-                }}
-              />
             </main>
 
             <aside className="rail">

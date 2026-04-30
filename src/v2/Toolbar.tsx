@@ -9,6 +9,7 @@ type Props = {
   onStop: () => void;
   onRequestExperiments: (count: number) => void;
   onSetRunners: (count: number) => void;
+  onSetPlannerCount: (count: number) => void;
 };
 
 export function Toolbar({
@@ -19,13 +20,21 @@ export function Toolbar({
   onStop,
   onRequestExperiments,
   onSetRunners,
+  onSetPlannerCount,
 }: Props) {
   const [requestCount, setRequestCount] = useState("5");
   const [runners, setRunners] = useState(workerControl?.desiredRunnerCount ?? 1);
+  const [plannerCount, setPlannerCount] = useState(
+    workerControl?.desiredPlannerCount ?? 3,
+  );
 
   useEffect(() => {
     setRunners(workerControl?.desiredRunnerCount ?? 1);
   }, [workerControl?.desiredRunnerCount]);
+
+  useEffect(() => {
+    setPlannerCount(workerControl?.desiredPlannerCount ?? 3);
+  }, [workerControl?.desiredPlannerCount]);
 
   const status = String(session?.status ?? "");
   const isPausable = status !== "paused" && status !== "stopped" && status !== "completed";
@@ -34,6 +43,12 @@ export function Toolbar({
     const clamped = Math.max(0, Math.min(64, Math.trunc(next)));
     setRunners(clamped);
     onSetRunners(clamped);
+  }
+
+  function commitPlannerCount(next: number) {
+    const clamped = Math.max(1, Math.min(64, Math.trunc(next)));
+    setPlannerCount(clamped);
+    onSetPlannerCount(clamped);
   }
 
   return (
@@ -70,6 +85,29 @@ export function Toolbar({
             onClick={() => commitRunners(runners + 1)}
             disabled={runners >= 64}
             aria-label="more runners"
+          >
+            <Plus size={13} />
+          </button>
+        </div>
+      </div>
+
+      <div className="group">
+        <span className="group-label">max plan</span>
+        <div className="stepper">
+          <button
+            type="button"
+            onClick={() => commitPlannerCount(plannerCount - 1)}
+            disabled={plannerCount <= 1}
+            aria-label="fewer planned experiments"
+          >
+            <Minus size={13} />
+          </button>
+          <div className="stepper-value">{plannerCount}</div>
+          <button
+            type="button"
+            onClick={() => commitPlannerCount(plannerCount + 1)}
+            disabled={plannerCount >= 64}
+            aria-label="more planned experiments"
           >
             <Plus size={13} />
           </button>

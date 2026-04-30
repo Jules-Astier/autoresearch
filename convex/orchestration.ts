@@ -125,6 +125,7 @@ export const getWorkerControl = query({
     return {
       key: WORKER_CONTROL_KEY,
       desiredRunnerCount: control?.desiredRunnerCount ?? 0,
+      desiredPlannerCount: control?.desiredPlannerCount ?? 3,
       updatedAtUtc: control?.updatedAtUtc ?? "",
     };
   },
@@ -387,9 +388,19 @@ export const claimPlanningCycle = mutation({
     if (remaining <= 0) {
       return null;
     }
+    const control = await ctx.db
+      .query("researchWorkerControls")
+      .withIndex("by_key", (q) => q.eq("key", WORKER_CONTROL_KEY))
+      .first();
+    const desiredPlannerCount = normalizeInteger(
+      args.requestedCount ?? control?.desiredPlannerCount ?? 3,
+      "requestedCount",
+      1,
+      64,
+    );
     const requestedCount = Math.min(
       remaining,
-      Math.max(1, args.requestedCount ?? 1),
+      desiredPlannerCount,
     );
     const now = nowUtc();
     const cycleId = await ctx.db.insert("researchPlanningCycles", {
@@ -1159,24 +1170,34 @@ export const setSessionConcurrency = mutation({
 
 export const setWorkerControl = mutation({
   args: {
-    desiredRunnerCount: v.float64(),
+    desiredRunnerCount: v.optional(v.float64()),
+    desiredPlannerCount: v.optional(v.float64()),
   },
   handler: async (ctx, args) => {
-    const desiredRunnerCount = normalizeInteger(
-      args.desiredRunnerCount,
-      "desiredRunnerCount",
-      0,
-      64,
-    );
+    if (
+      args.desiredRunnerCount === undefined &&
+      args.desiredPlannerCount === undefined
+    ) {
+      throw new Error("setWorkerControl requires at least one control value");
+    }
     const now = nowUtc();
     const existing = await ctx.db
       .query("researchWorkerControls")
       .withIndex("by_key", (q) => q.eq("key", WORKER_CONTROL_KEY))
       .first();
+    const desiredRunnerCount =
+      args.desiredRunnerCount === undefined
+        ? (existing?.desiredRunnerCount ?? 0)
+        : normalizeInteger(args.desiredRunnerCount, "desiredRunnerCount", 0, 64);
+    const desiredPlannerCount =
+      args.desiredPlannerCount === undefined
+        ? (existing?.desiredPlannerCount ?? 3)
+        : normalizeInteger(args.desiredPlannerCount, "desiredPlannerCount", 1, 64);
 
     if (existing) {
       await ctx.db.patch(existing._id, {
         desiredRunnerCount,
+        desiredPlannerCount,
         updatedAtUtc: now,
       });
       return existing._id;
@@ -1185,6 +1206,7 @@ export const setWorkerControl = mutation({
     return ctx.db.insert("researchWorkerControls", {
       key: WORKER_CONTROL_KEY,
       desiredRunnerCount,
+      desiredPlannerCount,
       updatedAtUtc: now,
     });
   },
