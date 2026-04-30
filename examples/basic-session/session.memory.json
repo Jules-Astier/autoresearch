@@ -1,0 +1,35 @@
+{
+  "slug": "basic-model-search-memory",
+  "title": "Basic model search with durable memory",
+  "repoPath": "../target-project",
+  "baseRef": "HEAD",
+  "benchmarkCommand": "npm test -- --json",
+  "targetExperimentCount": 10,
+  "maxConcurrentRuns": 1,
+  "editablePaths": [
+    "src/model.ts",
+    "config/tunable.json"
+  ],
+  "immutablePaths": [
+    "data/**",
+    "config/fixed.json"
+  ],
+  "runtimeConfigPaths": [
+    "config/tunable.json"
+  ],
+  "modelIoContract": "Preserve the existing command line interface and metric output.",
+  "memory": {
+    "enabled": true,
+    "rootPath": "research",
+    "referencePaths": [
+      "references"
+    ]
+  },
+  "metricContract": {
+    "rankingMode": "lexicographic",
+    "metrics": [
+      { "name": "validation_loss", "direction": "minimize", "role": "objective" },
+      { "name": "accuracy", "direction": "maximize", "role": "objective" }
+    ]
+  }
+}

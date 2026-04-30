@@ -6,6 +6,7 @@ against any repository. It provides:
 - a Convex backend for sessions, queues, runs, patches, logs, and metrics
 - a React dashboard for supervising sessions and workers
 - local planner and runner processes
+- optional researcher and memory-keeper roles for durable research context
 - a generic `session.json` contract that can be registered from anywhere
 
 The target project stays in its own repository. Autoresearch only needs a session
@@ -92,6 +93,11 @@ Sandcastle-backed Docker or Podman sandbox for agent and benchmark execution,
 and can select `codex`, `claude-code`, `opencode`, or `pi` as the worker agent.
 Metrics are parsed from the last JSON object in benchmark output or from
 `metric_name: 1.23` lines.
+
+Sessions can also opt into durable research memory with a `memory` block. The
+researcher runs before planning to turn notes and references into candidate
+hypotheses; the memory keeper runs after each run to update repo-local notes,
+duplicate warnings, and campaign context.
 
 ## TikZ Diagrams
 

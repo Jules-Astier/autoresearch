@@ -7,6 +7,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const DEFAULT_COMPUTE_BUDGET_SECONDS = 300;
 
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
@@ -81,6 +82,7 @@ function normalizeSessionContract(contract, sessionDir) {
     baseRef: optionalString(contract.baseRef),
     benchmarkCommand: requiredString(contract.benchmarkCommand, "benchmarkCommand"),
     metricParserCommand: optionalString(contract.metricParserCommand),
+    computeBudget: normalizeComputeBudgetConfig(contract.computeBudget ?? contract.computeBudgetSeconds),
     targetExperimentCount: requiredPositiveInteger(contract.targetExperimentCount, "targetExperimentCount"),
     maxConcurrentRuns: requiredNonNegativeInteger(contract.maxConcurrentRuns, "maxConcurrentRuns"),
     editablePaths: requiredStringArray(contract.editablePaths, "editablePaths"),
@@ -88,6 +90,7 @@ function normalizeSessionContract(contract, sessionDir) {
     runtimeConfigPaths: stringArray(contract.runtimeConfigPaths, "runtimeConfigPaths"),
     modelIoContract: optionalString(contract.modelIoContract),
     agent: normalizeAgentConfig(contract.agent),
+    memory: normalizeMemoryConfig(contract.memory),
     metricContract,
     sandbox: normalizeSandboxConfig(contract.sandbox),
     earlyStopping: contract.earlyStopping
@@ -207,6 +210,100 @@ function normalizeAgentConfig(value) {
   return normalized;
 }
 
+function normalizeComputeBudgetConfig(value) {
+  if (value === undefined || value === null || value === "") {
+    return { seconds: DEFAULT_COMPUTE_BUDGET_SECONDS };
+  }
+  if (typeof value === "number" || typeof value === "string") {
+    return { seconds: parseDurationSeconds(value, "computeBudget") };
+  }
+  if (!isPlainObject(value)) {
+    throw new Error("computeBudget must be an object, number of seconds, or duration string");
+  }
+
+  const secondsValue =
+    value.seconds ??
+    value.durationSeconds ??
+    value.benchmarkSeconds ??
+    value.benchmarkTimeoutSeconds;
+  const minutesValue = value.minutes ?? value.durationMinutes;
+  const seconds =
+    secondsValue !== undefined && secondsValue !== null && secondsValue !== ""
+      ? parseDurationSeconds(secondsValue, "computeBudget.seconds")
+      : minutesValue !== undefined && minutesValue !== null && minutesValue !== ""
+        ? parseDurationMinutes(minutesValue, "computeBudget.minutes")
+        : DEFAULT_COMPUTE_BUDGET_SECONDS;
+  return { ...value, seconds };
+}
+
+function normalizeMemoryConfig(value) {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "boolean") {
+    return normalizeMemoryConfig({ enabled: value });
+  }
+  if (!isPlainObject(value)) {
+    throw new Error("memory must be an object when provided");
+  }
+
+  const enabled = optionalBoolean(value.enabled, "memory.enabled") ?? true;
+  const rootPath = normalizeRelativeConfigPath(
+    optionalString(value.rootPath) ?? "research",
+    "memory.rootPath"
+  );
+  const normalized = {
+    ...value,
+    enabled,
+    rootPath,
+    notesPath: normalizeRelativeConfigPath(
+      optionalString(value.notesPath) ?? path.posix.join(rootPath, "notes.md"),
+      "memory.notesPath"
+    ),
+    doNotRepeatPath: normalizeRelativeConfigPath(
+      optionalString(value.doNotRepeatPath) ?? path.posix.join(rootPath, "do-not-repeat.md"),
+      "memory.doNotRepeatPath"
+    ),
+    paperIdeasPath: normalizeRelativeConfigPath(
+      optionalString(value.paperIdeasPath) ?? path.posix.join(rootPath, "paper-ideas.md"),
+      "memory.paperIdeasPath"
+    ),
+    campaignsPath: normalizeRelativeConfigPath(
+      optionalString(value.campaignsPath) ?? path.posix.join(rootPath, "campaigns"),
+      "memory.campaignsPath"
+    ),
+    experimentsPath: normalizeRelativeConfigPath(
+      optionalString(value.experimentsPath) ?? path.posix.join(rootPath, "experiments"),
+      "memory.experimentsPath"
+    ),
+    templatesPath: normalizeRelativeConfigPath(
+      optionalString(value.templatesPath) ?? path.posix.join(rootPath, "templates"),
+      "memory.templatesPath"
+    ),
+    referencePaths: stringArray(value.referencePaths, "memory.referencePaths").map((item, index) =>
+      normalizeRelativeConfigPath(item, `memory.referencePaths[${index}]`)
+    ),
+    researcher: normalizeMemoryRoleConfig(value.researcher, enabled, "memory.researcher"),
+    memoryKeeper: normalizeMemoryRoleConfig(value.memoryKeeper, enabled, "memory.memoryKeeper")
+  };
+  return normalized;
+}
+
+function normalizeMemoryRoleConfig(value, defaultEnabled, field) {
+  if (value === undefined || value === null) {
+    return { enabled: defaultEnabled };
+  }
+  if (typeof value === "boolean") {
+    return { enabled: value };
+  }
+  if (!isPlainObject(value)) {
+    throw new Error(`${field} must be an object or boolean when provided`);
+  }
+  return {
+    ...value,
+    enabled: optionalBoolean(value.enabled, `${field}.enabled`) ?? defaultEnabled,
+    instructions: optionalString(value.instructions)
+  };
+}
+
 function resolveContractPath(value, sessionDir) {
   return path.isAbsolute(value) ? value : path.resolve(sessionDir, value);
 }
@@ -222,6 +319,71 @@ function optionalString(value) {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new Error("optional string field must be a string");
   return value.trim();
+}
+
+function optionalBoolean(value, field) {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value;
+}
+
+function parseDurationSeconds(value, field) {
+  if (typeof value === "number") {
+    return requiredPositiveDurationSeconds(value, field);
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${field} must be a positive duration`);
+  }
+  const trimmed = value.trim().toLowerCase();
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) {
+    return requiredPositiveDurationSeconds(numeric, field);
+  }
+  const match = trimmed.match(
+    /^(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)$/,
+  );
+  if (!match) {
+    throw new Error(`${field} must be a positive duration like 300, "300s", or "5m"`);
+  }
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const multiplier = unit.startsWith("h") ? 3600 : unit.startsWith("m") ? 60 : 1;
+  return requiredPositiveDurationSeconds(amount * multiplier, field);
+}
+
+function parseDurationMinutes(value, field) {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) {
+    throw new Error(`${field} must be a positive number of minutes`);
+  }
+  return requiredPositiveDurationSeconds(minutes * 60, field);
+}
+
+function requiredPositiveDurationSeconds(value, field) {
+  const seconds = Math.ceil(Number(value));
+  if (!Number.isFinite(seconds) || seconds < 1) {
+    throw new Error(`${field} must be at least 1 second`);
+  }
+  return seconds;
+}
+
+function normalizeRelativeConfigPath(value, field) {
+  const normalized = requiredString(value, field)
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/\/+$/g, "");
+  if (
+    path.posix.isAbsolute(normalized) ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../")
+  ) {
+    throw new Error(`${field} must be a relative path inside repoPath`);
+  }
+  return normalized;
 }
 
 function requiredStringArray(value, field) {

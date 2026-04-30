@@ -20,6 +20,7 @@ const createSessionArgs = {
   runtimeConfigPaths: v.optional(v.array(v.string())),
   modelIoContract: v.optional(v.string()),
   agent: v.optional(v.any()),
+  memory: v.optional(v.any()),
   metricContract: v.any(),
   sandbox: v.optional(v.any()),
   earlyStopping: v.optional(v.any()),
@@ -172,6 +173,7 @@ export const createResearchSession = mutation({
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
       modelIoContract: args.modelIoContract,
       agent: args.agent,
+      memory: args.memory,
       metricContract,
       sandbox: args.sandbox,
       earlyStopping: args.earlyStopping,
@@ -219,6 +221,7 @@ export const registerResearchSession = mutation({
         runtimeConfigPaths: args.runtimeConfigPaths ?? [],
         modelIoContract: args.modelIoContract,
         agent: args.agent,
+        memory: args.memory,
         metricContract,
         sandbox: args.sandbox,
         earlyStopping: args.earlyStopping,
@@ -247,6 +250,7 @@ export const registerResearchSession = mutation({
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
       modelIoContract: args.modelIoContract,
       agent: args.agent,
+      memory: args.memory,
       metricContract,
       sandbox: args.sandbox,
       earlyStopping: args.earlyStopping,
@@ -275,6 +279,7 @@ export const updateResearchSessionContract = mutation({
     runtimeConfigPaths: v.optional(v.array(v.string())),
     modelIoContract: v.optional(v.string()),
     agent: v.optional(v.any()),
+    memory: v.optional(v.any()),
     metricContract: v.optional(v.any()),
     sandbox: v.optional(v.any()),
     earlyStopping: v.optional(v.any()),
@@ -294,6 +299,8 @@ export const updateResearchSessionContract = mutation({
       patch.modelIoContract = args.modelIoContract;
     if (args.agent !== undefined)
       patch.agent = args.agent;
+    if (args.memory !== undefined)
+      patch.memory = args.memory;
     if (args.metricContract !== undefined)
       patch.metricContract = normalizeMetricContract(args.metricContract);
     if (args.sandbox !== undefined)
@@ -462,6 +469,7 @@ export const claimPlanningCycle = mutation({
 export const finishPlanningCycle = mutation({
   args: {
     planningCycleId: v.id("researchPlanningCycles"),
+    researcherOutput: v.optional(v.string()),
     plannerOutput: v.string(),
     reviewerOutput: v.string(),
     approvedExperiments: v.array(
@@ -478,9 +486,20 @@ export const finishPlanningCycle = mutation({
       throw new Error(`missing planning cycle ${args.planningCycleId}`);
     }
     await ctx.db.patch(args.planningCycleId, {
+      researcherOutput: args.researcherOutput?.slice(-20000),
       plannerOutput: args.plannerOutput.slice(-20000),
       reviewerOutput: args.reviewerOutput.slice(-20000),
     });
+    if (args.researcherOutput) {
+      await ctx.db.insert("researchAgentMessages", {
+        sessionId: cycle.sessionId,
+        role: "assistant",
+        source: "researcher",
+        content: args.researcherOutput.slice(-12000),
+        sequence: Date.now() - 1,
+        createdAtUtc: nowUtc(),
+      });
+    }
     await ctx.db.insert("researchAgentMessages", {
       sessionId: cycle.sessionId,
       role: "assistant",
@@ -889,6 +908,7 @@ export const completeRun = mutation({
         : `Run ${status}.`,
       payload: { metrics: args.metrics, score, promoted },
     });
+    return { status, score, promoted, sessionStatus: nextStatus };
   },
 });
 

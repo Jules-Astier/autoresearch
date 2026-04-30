@@ -16,7 +16,8 @@ const DEFAULT_WORKSPACE_ROOT = path.resolve(ROOT, "..", ".runtime", "codex-runne
 const RUNNER_METADATA_FILES = new Set([
   "AUTORESEARCH_PROMPT.md",
   "AUTORESEARCH_CODEX_FINAL.md",
-  "AUTORESEARCH_EXPERIMENT.json"
+  "AUTORESEARCH_EXPERIMENT.json",
+  "AUTORESEARCH_MEMORY_KEEPER.md"
 ]);
 const GENERATED_ARTIFACT_PARTS = new Set([
   "__pycache__",
@@ -166,8 +167,13 @@ async function runClaim(client, claim, args) {
   }
 
   if (agent.code !== 0) {
-    await client.mutation(api.orchestration.failRun, {
+    await failRunAndRemember(client, {
       runId,
+      session,
+      experiment,
+      workspacePath,
+      config: runnerConfig,
+      baseRef: patchBaseRef,
       error: `${runnerConfig.agentProvider} exited with ${agent.code}`,
       codexExitCode: agent.code
     });
@@ -189,19 +195,44 @@ async function runClaim(client, claim, args) {
   });
 
   if (patch.changedFiles.length === 0) {
-    await client.mutation(api.orchestration.failRun, {
+    await failRunAndRemember(client, {
       runId,
+      session,
+      experiment,
+      workspacePath,
+      config: runnerConfig,
+      baseRef: patchBaseRef,
       error: `${runnerConfig.agentProvider} completed without changing any tracked files`,
-      codexExitCode: agent.code
+      codexExitCode: agent.code,
+      patch: {
+        changedFiles: patch.changedFiles,
+        rejectedFiles: patch.rejectedFiles,
+        diffStat: patch.diffStat,
+        contentHash: patch.contentHash
+      }
     });
     return;
   }
 
   if (patchResult.status !== "accepted") {
-    await client.mutation(api.orchestration.failRun, {
+    await failRunAndRemember(client, {
       runId,
+      session,
+      experiment,
+      workspacePath,
+      config: runnerConfig,
+      baseRef: patchBaseRef,
       error: patchResult.rejectionReason || "patch rejected",
-      codexExitCode: agent.code
+      codexExitCode: agent.code,
+      patch: {
+        patchId: patchResult.patchId,
+        status: patchResult.status,
+        changedFiles: patch.changedFiles,
+        rejectedFiles: patch.rejectedFiles,
+        diffStat: patch.diffStat,
+        contentHash: patch.contentHash,
+        rejectionReason: patchResult.rejectionReason
+      }
     });
     return;
   }
@@ -217,10 +248,23 @@ async function runClaim(client, claim, args) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await client.mutation(api.orchestration.failRun, {
+    await failRunAndRemember(client, {
       runId,
+      session,
+      experiment,
+      workspacePath,
+      config: runnerConfig,
+      baseRef: patchBaseRef,
       error: message.slice(0, 4000),
-      codexExitCode: agent.code
+      codexExitCode: agent.code,
+      patch: {
+        patchId: patchResult.patchId,
+        status: patchResult.status,
+        changedFiles: patch.changedFiles,
+        rejectedFiles: patch.rejectedFiles,
+        diffStat: patch.diffStat,
+        contentHash: patch.contentHash
+      }
     });
     return;
   }
@@ -241,16 +285,30 @@ async function runClaim(client, claim, args) {
   const metrics = parseMetrics(summaryText, session.metricContract);
 
   if (Object.keys(metrics).length === 0) {
-    await client.mutation(api.orchestration.failRun, {
+    await failRunAndRemember(client, {
       runId,
+      session,
+      experiment,
+      workspacePath,
+      config: runnerConfig,
+      baseRef: patchBaseRef,
       error: "benchmark completed without parseable numeric metrics",
       codexExitCode: agent.code,
-      benchmarkExitCode: benchmark.code
+      benchmarkExitCode: benchmark.code,
+      summary: summaryText.slice(-4000),
+      patch: {
+        patchId: patchResult.patchId,
+        status: patchResult.status,
+        changedFiles: patch.changedFiles,
+        rejectedFiles: patch.rejectedFiles,
+        diffStat: patch.diffStat,
+        contentHash: patch.contentHash
+      }
     });
     return;
   }
 
-  await client.mutation(api.orchestration.completeRun, {
+  const completion = await client.mutation(api.orchestration.completeRun, {
     runId,
     patchId: patchResult.patchId,
     codexExitCode: agent.code,
@@ -258,6 +316,242 @@ async function runClaim(client, claim, args) {
     metrics,
     summary: extractLastJson(summaryText) ?? summaryText.slice(-4000)
   });
+  await maybeRunMemoryKeeper({
+    client,
+    runId,
+    session,
+    experiment,
+    workspacePath,
+    config: runnerConfig,
+    outcome: {
+      status: completion?.status ?? (benchmark.code === 0 ? "completed" : "failed"),
+      baseRef: patchBaseRef,
+      metrics,
+      score: completion?.score,
+      promoted: completion?.promoted === true,
+      codexExitCode: agent.code,
+      benchmarkExitCode: benchmark.code,
+      summary: extractLastJson(summaryText) ?? summaryText.slice(-4000)
+    },
+    patch: {
+      patchId: patchResult.patchId,
+      status: patchResult.status,
+      changedFiles: patch.changedFiles,
+      rejectedFiles: patch.rejectedFiles,
+      diffStat: patch.diffStat,
+      contentHash: patch.contentHash
+    }
+  });
+}
+
+async function failRunAndRemember(client, {
+  runId,
+  session,
+  experiment,
+  workspacePath,
+  config,
+  baseRef,
+  error,
+  codexExitCode,
+  benchmarkExitCode,
+  summary,
+  patch
+}) {
+  await client.mutation(api.orchestration.failRun, {
+    runId,
+    error,
+    codexExitCode,
+    benchmarkExitCode
+  });
+  await maybeRunMemoryKeeper({
+    client,
+    runId,
+    session,
+    experiment,
+    workspacePath,
+    config,
+    outcome: {
+      status: "failed",
+      baseRef,
+      error,
+      codexExitCode,
+      benchmarkExitCode,
+      summary
+    },
+    patch
+  });
+}
+
+async function maybeRunMemoryKeeper({
+  client,
+  runId,
+  session,
+  experiment,
+  workspacePath,
+  config,
+  outcome,
+  patch
+}) {
+  const memory = normalizeMemoryConfig(session.memory);
+  if (!memory || memory.enabled === false || memory.memoryKeeper?.enabled === false) {
+    return;
+  }
+
+  const repoPath = path.resolve(ROOT, session.repoPath);
+  if (!fs.existsSync(repoPath)) {
+    await appendMemoryKeeperLog(client, runId, `memory keeper skipped: repoPath does not exist: ${repoPath}\n`);
+    return;
+  }
+
+  try {
+    await withDirectoryLock(path.join(repoPath, ".autoresearch-memory.lock"), async () => {
+      prepareMemoryPaths(repoPath, memory);
+      const prompt = buildMemoryKeeperPrompt({ session, experiment, outcome, patch, memory });
+      const finalPath = path.join(workspacePath, "AUTORESEARCH_MEMORY_KEEPER.md");
+      const provider = createAgentProvider(config);
+      const printCommand = provider.buildPrintCommand({
+        prompt,
+        dangerouslySkipPermissions: true
+      });
+      const result = await runAgentProviderCommand({
+        client,
+        runId,
+        cwd: repoPath,
+        command: printCommand.command,
+        input: printCommand.stdin,
+        env: provider.env,
+        provider,
+        stdoutStream: "memory_keeper_stdout",
+        stderrStream: "memory_keeper_stderr"
+      });
+      const final = result.result || result.stdout || "";
+      fs.writeFileSync(finalPath, final, "utf8");
+      await client.mutation(api.orchestration.appendAgentMessage, {
+        sessionId: session._id,
+        experimentId: experiment._id,
+        runId,
+        role: "assistant",
+        source: "memory_keeper",
+        sequence: Date.now(),
+        content: final.slice(-12000) || `memory keeper exited with ${result.code}`
+      });
+      if (result.code !== 0) {
+        await appendMemoryKeeperLog(client, runId, `memory keeper exited with ${result.code}\n`);
+      }
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await appendMemoryKeeperLog(client, runId, `memory keeper failed: ${message}\n`);
+  }
+}
+
+function buildMemoryKeeperPrompt({ session, experiment, outcome, patch, memory }) {
+  return `You are the memory keeper for this Autoresearch session.
+
+Update durable research memory in the target repo after this run. Keep notes concise, factual, and comparable across runs.
+
+Primary memory paths:
+${formatMemoryPaths(memory)}
+
+Session:
+${JSON.stringify({
+  title: session.title,
+  slug: session.slug,
+  benchmarkCommand: session.benchmarkCommand,
+  metricContract: session.metricContract,
+  bestMetrics: session.bestMetrics
+}, null, 2)}
+
+Experiment:
+${JSON.stringify({
+  ordinal: experiment.ordinal,
+  hypothesis: experiment.hypothesis,
+  changeKind: experiment.changeKind,
+  prompt: experiment.prompt
+}, null, 2)}
+
+Run outcome:
+${JSON.stringify(outcome ?? {}, null, 2)}
+
+Patch:
+${JSON.stringify(patch ?? {}, null, 2)}
+
+Responsibilities:
+- Preserve the hypothesis tested, parent/base reference when available, metric values or failure state, current-best decision, and one short interpretation.
+- Turn regressions, invalid runs, patch rejections, and duplicate discoveries into concise do-not-repeat guidance.
+- Summarize wins and near misses without rewriting history.
+- Keep campaign and experiment notes current when the configured paths exist.
+
+Rules:
+- Edit only files under the configured memory paths.
+- Do not edit source code, benchmarks, data, generated artifacts, credentials, or deployment files.
+- Do not run benchmark commands.
+- Do not delete useful historical failures.
+- Create missing memory files or directories when needed.
+${memory.memoryKeeper?.instructions ? `\nAdditional memory keeper instructions:\n${memory.memoryKeeper.instructions}` : ""}
+
+Final response must summarize which memory files changed and the durable note added.`;
+}
+
+function formatMemoryPaths(memory) {
+  const paths = [
+    ["notes", memory.notesPath],
+    ["do-not-repeat", memory.doNotRepeatPath],
+    ["paper ideas", memory.paperIdeasPath],
+    ["campaigns", memory.campaignsPath],
+    ["experiments", memory.experimentsPath],
+    ["templates", memory.templatesPath],
+    ...memory.referencePaths.map((item) => ["reference", item])
+  ];
+  return paths.map(([label, value]) => `- ${label}: ${value}`).join("\n");
+}
+
+function prepareMemoryPaths(repoPath, memory) {
+  for (const relativePath of [
+    path.posix.dirname(memory.notesPath),
+    path.posix.dirname(memory.doNotRepeatPath),
+    path.posix.dirname(memory.paperIdeasPath),
+    memory.campaignsPath,
+    memory.experimentsPath,
+    memory.templatesPath
+  ]) {
+    fs.mkdirSync(safeResolveRepoPath(repoPath, relativePath), { recursive: true });
+  }
+}
+
+async function appendMemoryKeeperLog(client, runId, chunk) {
+  try {
+    await client.mutation(api.orchestration.appendRunLog, {
+      runId,
+      stream: "memory_keeper_stderr",
+      sequence: Date.now(),
+      chunk: String(chunk).slice(-8000)
+    });
+  } catch (error) {
+    console.error("failed to append memory keeper log:", error);
+  }
+}
+
+async function withDirectoryLock(lockPath, fn) {
+  const timeoutMs = Number(process.env.AUTORESEARCH_MEMORY_LOCK_TIMEOUT_MS ?? 120000);
+  const startedAt = Date.now();
+  while (true) {
+    try {
+      fs.mkdirSync(lockPath);
+      fs.writeFileSync(path.join(lockPath, "owner"), `${process.pid}\n${new Date().toISOString()}\n`, "utf8");
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST" || Date.now() - startedAt > timeoutMs) {
+        throw new Error(`Timed out waiting for memory keeper lock: ${lockPath}`);
+      }
+      await sleep(500);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    fs.rmSync(lockPath, { recursive: true, force: true });
+  }
 }
 
 function prepareWorkspace({ session, basePatch, experiment, runId, args }) {
@@ -1360,6 +1654,47 @@ function globMatch(file, pattern) {
 
 function normalizeRelativePath(value) {
   return String(value).replace(/^"|"$/g, "").replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+function normalizeMemoryConfig(value) {
+  if (!isPlainObject(value) || value.enabled === false) {
+    return null;
+  }
+  const rootPath = normalizeRelativePath(value.rootPath || "research").replace(/\/+$/g, "");
+  const memory = {
+    ...value,
+    enabled: true,
+    rootPath,
+    notesPath: normalizeRelativePath(value.notesPath || path.posix.join(rootPath, "notes.md")),
+    doNotRepeatPath: normalizeRelativePath(value.doNotRepeatPath || path.posix.join(rootPath, "do-not-repeat.md")),
+    paperIdeasPath: normalizeRelativePath(value.paperIdeasPath || path.posix.join(rootPath, "paper-ideas.md")),
+    campaignsPath: normalizeRelativePath(value.campaignsPath || path.posix.join(rootPath, "campaigns")),
+    experimentsPath: normalizeRelativePath(value.experimentsPath || path.posix.join(rootPath, "experiments")),
+    templatesPath: normalizeRelativePath(value.templatesPath || path.posix.join(rootPath, "templates")),
+    referencePaths: Array.isArray(value.referencePaths)
+      ? value.referencePaths.map((item) => normalizeRelativePath(item)).filter(Boolean)
+      : [],
+    researcher: normalizeMemoryRoleConfig(value.researcher, true),
+    memoryKeeper: normalizeMemoryRoleConfig(value.memoryKeeper, true)
+  };
+  return memory;
+}
+
+function normalizeMemoryRoleConfig(value, defaultEnabled) {
+  if (typeof value === "boolean") return { enabled: value };
+  if (isPlainObject(value)) {
+    return { ...value, enabled: value.enabled !== false };
+  }
+  return { enabled: defaultEnabled };
+}
+
+function safeResolveRepoPath(repoPath, relativePath) {
+  const repoRoot = path.resolve(repoPath);
+  const absolutePath = path.resolve(repoRoot, normalizeRelativePath(relativePath));
+  if (absolutePath !== repoRoot && !absolutePath.startsWith(`${repoRoot}${path.sep}`)) {
+    throw new Error(`Path escapes repoPath: ${relativePath}`);
+  }
+  return absolutePath;
 }
 
 function shouldSkipCopy(source) {

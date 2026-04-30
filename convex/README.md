@@ -36,8 +36,8 @@ npm run convex:seed
 - `researchArtifacts`: rendered run artifacts. TikZ diagrams are stored here as
   PNG bytes only; PDFs are temporary compile intermediates and are not
   persisted.
-- `researchPlanningCycles`: planner/reviewer batches that enqueue independent
-  experiments for parallel execution.
+- `researchPlanningCycles`: researcher/planner/reviewer batches that enqueue
+  independent experiments for parallel execution.
 
 Use `npm run orchestrator:codex` to plan and review experiment batches, then use
 `npm run runner:codex` to consume queued experiments. The runner uses the
@@ -58,3 +58,8 @@ active session while reconciling the runner count into local agent subprocesses.
 The runner records a patch after the agent edits and before benchmarks run. A run can
 complete only when it references an accepted patch, so metrics are always linked
 to a concrete code state.
+
+When a session has a `memory` block, the orchestrator runs an optional read-only
+researcher before the planner and stores its output with the planning cycle. The
+runner runs an optional memory keeper after completed or internally failed runs
+to update the configured repo-local research notes.

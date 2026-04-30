@@ -61,21 +61,49 @@ async function runPlanningCycle(client, claim, args) {
   const cycleDir = path.join(DEFAULT_WORKSPACE_ROOT, slug(session.slug), String(Date.now()));
   fs.mkdirSync(cycleDir, { recursive: true });
 
-  const plannerPrompt = buildPlannerPrompt({ session, experiments, patches, requestedCount });
+  const memorySnapshot = readMemorySnapshot(repoPath, session.memory);
+  const researcherOutput = shouldRunResearcher(session)
+    ? await runCodex({
+        cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
+        outputPath: path.join(cycleDir, "researcher-final.md"),
+        prompt: buildResearcherPrompt({ session, experiments, patches, requestedCount, memorySnapshot }),
+        args,
+        dryRunOutput: { candidates: [], rejected: [] }
+      })
+    : "";
+  const research = researcherOutput ? parseJsonObject(researcherOutput, "researcher") : null;
+
+  const plannerPrompt = buildPlannerPrompt({
+    session,
+    experiments,
+    patches,
+    requestedCount,
+    memorySnapshot,
+    research
+  });
   const plannerOutput = await runCodex({
     cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
     outputPath: path.join(cycleDir, "planner-final.md"),
     prompt: plannerPrompt,
-    args
+    args,
+    dryRunOutput: dryRunPlan(requestedCount)
   });
   const plan = parseJsonObject(plannerOutput, "planner");
 
-  const reviewerPrompt = buildReviewerPrompt({ session, experiments, plan, requestedCount });
+  const reviewerPrompt = buildReviewerPrompt({
+    session,
+    experiments,
+    plan,
+    requestedCount,
+    memorySnapshot,
+    research
+  });
   const reviewerOutput = await runCodex({
     cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
     outputPath: path.join(cycleDir, "reviewer-final.md"),
     prompt: reviewerPrompt,
-    args
+    args,
+    dryRunOutput: dryRunReview()
   });
   const review = parseJsonObject(reviewerOutput, "reviewer");
   const approved = normalizeApprovedExperiments(review, plan, requestedCount);
@@ -86,6 +114,7 @@ async function runPlanningCycle(client, claim, args) {
 
   await client.mutation(api.orchestration.finishPlanningCycle, {
     planningCycleId,
+    researcherOutput: researcherOutput || undefined,
     plannerOutput,
     reviewerOutput,
     approvedExperiments: approved
@@ -93,18 +122,73 @@ async function runPlanningCycle(client, claim, args) {
   console.log(`Queued ${approved.length} approved experiments for ${session.slug}`);
 }
 
-function buildPlannerPrompt({ session, experiments, patches, requestedCount }) {
+function buildResearcherPrompt({ session, experiments, patches, requestedCount, memorySnapshot }) {
+  const recent = formatRecentExperiments(experiments, 30);
+  const recentPatches = formatRecentPatches(patches, 12);
+  const memory = normalizeMemoryConfig(session.memory);
+
+  return `You are the researcher for a Convex-backed ML autoresearch system.
+
+Scout for paper-derived or reference-derived experiment ideas before the planner chooses the next batch.
+
+Session:
+${JSON.stringify({
+  title: session.title,
+  slug: session.slug,
+  benchmarkCommand: session.benchmarkCommand,
+  requestedCount,
+  editablePaths: session.editablePaths,
+  immutablePaths: session.immutablePaths,
+  runtimeConfigPaths: session.runtimeConfigPaths,
+  modelIoContract: session.modelIoContract,
+  metricContract: session.metricContract,
+  bestMetrics: session.bestMetrics
+}, null, 2)}
+
+Durable memory paths:
+${formatMemoryPaths(memory)}
+
+Durable memory excerpts:
+${formatMemorySnapshot(memorySnapshot)}
+
+Recent experiments:
+${recent || "- none"}
+
+Recent patches:
+${recentPatches || "- none"}
+
+Rules:
+- Read the configured memory and reference paths when they exist.
+- Do not edit files, run benchmarks, or claim a result is a win without benchmark evidence.
+- Translate references into clean single-change hypotheses that fit editable paths.
+- Reject ideas already present in current code, prior experiments, or do-not-repeat guidance.
+- Prefer concrete follow-ups over broad research themes.
+${memory?.researcher?.instructions ? `\nAdditional researcher instructions:\n${memory.researcher.instructions}` : ""}
+
+Return only JSON:
+{
+  "candidates": [
+    {
+      "hypothesis": "specific single-change hypothesis",
+      "changeKind": "architecture_change or config_change",
+      "prompt": "smallest credible worker instruction",
+      "rationale": "why this maps to the current target repo",
+      "risk": "main failure mode",
+      "source": "paper, reference path, or memory source"
+    }
+  ],
+  "rejected": [
+    { "idea": "rejected idea", "reason": "duplicate, stale, too broad, or incompatible" }
+  ]
+}`;
+}
+
+function buildPlannerPrompt({ session, experiments, patches, requestedCount, memorySnapshot, research }) {
   const recent = experiments
-    .slice(-20)
-    .map((experiment) => {
-      const metrics = experiment.metrics ? JSON.stringify(experiment.metrics) : "{}";
-      return `- #${experiment.ordinal} ${experiment.status}: ${experiment.hypothesis} metrics=${metrics}`;
-    })
-    .join("\n");
-  const recentPatches = patches
-    .slice(0, 8)
-    .map((patch) => `- ${patch.status} ${patch.contentHash.slice(0, 12)} files=${patch.changedFiles.join(", ")}`)
-    .join("\n");
+    ? formatRecentExperiments(experiments, 20)
+    : "";
+  const recentPatches = formatRecentPatches(patches, 8);
+  const memory = normalizeMemoryConfig(session.memory);
 
   return `You are the planner for a Convex-backed ML autoresearch system.
 
@@ -132,10 +216,17 @@ ${recent || "- none"}
 Recent patches:
 ${recentPatches || "- none"}
 
+Durable memory:
+${memory ? formatMemorySnapshot(memorySnapshot) : "- disabled"}
+
+Researcher candidates:
+${research ? JSON.stringify(research, null, 2) : "- researcher disabled or no candidates"}
+
 Rules:
 - Propose only changes that fit editable paths.
 - Prefer independent changes that can run in parallel without depending on each other.
 - Avoid duplicate or stale hypotheses.
+- Use durable memory and researcher candidates to avoid repeats and stale ideas.
 - Each experiment must be one coherent change.
 - Do not change data, benchmark command, metric parsing, immutable files, target definitions, credentials, or deployment behavior.
 
@@ -153,7 +244,8 @@ Return only JSON:
 }`;
 }
 
-function buildReviewerPrompt({ session, experiments, plan, requestedCount }) {
+function buildReviewerPrompt({ session, experiments, plan, requestedCount, memorySnapshot, research }) {
+  const memory = normalizeMemoryConfig(session.memory);
   return `You are the reviewer for an ML autoresearch batch.
 
 Review the proposed experiments for hard-rule violations, duplicates, stale ideas, multi-change scope, and dependency between experiments.
@@ -167,6 +259,12 @@ ${session.immutablePaths.map((item) => `- ${item}`).join("\n")}
 
 Prior experiments:
 ${experiments.slice(-20).map((item) => `- #${item.ordinal} ${item.status}: ${item.hypothesis}`).join("\n") || "- none"}
+
+Durable memory:
+${memory ? formatMemorySnapshot(memorySnapshot) : "- disabled"}
+
+Researcher candidates:
+${research ? JSON.stringify(research, null, 2) : "- researcher disabled or no candidates"}
 
 Planner proposal:
 ${JSON.stringify(plan, null, 2)}
@@ -186,26 +284,9 @@ Return only JSON:
 }`;
 }
 
-async function runCodex({ cwd, outputPath, prompt, args }) {
+async function runCodex({ cwd, outputPath, prompt, args, dryRunOutput }) {
   if (args.dryRun) {
-    return JSON.stringify({
-      experiments: [
-        {
-          hypothesis: "Dry-run config change placeholder.",
-          changeKind: "config_change",
-          prompt: "Dry-run only; do not execute.",
-          expectedImpact: "none",
-          independenceReason: "dry-run"
-        }
-      ],
-      approvedExperiments: [
-        {
-          hypothesis: "Dry-run config change placeholder.",
-          changeKind: "config_change",
-          prompt: "Dry-run only; do not execute."
-        }
-      ]
-    });
+    return JSON.stringify(dryRunOutput ?? dryRunPlan(1));
   }
 
   const codexBin = args.codexBin ?? process.env.AUTORESEARCH_CODEX_BIN ?? "codex";
@@ -225,6 +306,33 @@ async function runCodex({ cwd, outputPath, prompt, args }) {
     throw new Error(`Codex did not write output: ${outputPath}`);
   }
   return fs.readFileSync(outputPath, "utf8");
+}
+
+function dryRunPlan() {
+  return {
+    experiments: [
+      {
+        hypothesis: "Dry-run config change placeholder.",
+        changeKind: "config_change",
+        prompt: "Dry-run only; do not execute.",
+        expectedImpact: "none",
+        independenceReason: "dry-run"
+      }
+    ]
+  };
+}
+
+function dryRunReview() {
+  return {
+    approvedExperiments: [
+      {
+        hypothesis: "Dry-run config change placeholder.",
+        changeKind: "config_change",
+        prompt: "Dry-run only; do not execute."
+      }
+    ],
+    rejected: []
+  };
 }
 
 function normalizeApprovedExperiments(review, plan, requestedCount) {
@@ -261,6 +369,174 @@ function parseJsonObject(text, source) {
     }
   }
   throw new Error(`${source} output did not contain a JSON object`);
+}
+
+function shouldRunResearcher(session) {
+  const memory = normalizeMemoryConfig(session.memory);
+  return Boolean(memory && memory.enabled !== false && memory.researcher?.enabled !== false);
+}
+
+function normalizeMemoryConfig(value) {
+  if (!isPlainObject(value) || value.enabled === false) {
+    return null;
+  }
+  const rootPath = normalizeRelativePath(value.rootPath || "research");
+  return {
+    ...value,
+    enabled: true,
+    rootPath,
+    notesPath: normalizeRelativePath(value.notesPath || path.posix.join(rootPath, "notes.md")),
+    doNotRepeatPath: normalizeRelativePath(value.doNotRepeatPath || path.posix.join(rootPath, "do-not-repeat.md")),
+    paperIdeasPath: normalizeRelativePath(value.paperIdeasPath || path.posix.join(rootPath, "paper-ideas.md")),
+    campaignsPath: normalizeRelativePath(value.campaignsPath || path.posix.join(rootPath, "campaigns")),
+    experimentsPath: normalizeRelativePath(value.experimentsPath || path.posix.join(rootPath, "experiments")),
+    templatesPath: normalizeRelativePath(value.templatesPath || path.posix.join(rootPath, "templates")),
+    referencePaths: Array.isArray(value.referencePaths)
+      ? value.referencePaths.map((item) => normalizeRelativePath(item)).filter(Boolean)
+      : [],
+    researcher: normalizeMemoryRoleConfig(value.researcher, true),
+    memoryKeeper: normalizeMemoryRoleConfig(value.memoryKeeper, true)
+  };
+}
+
+function normalizeMemoryRoleConfig(value, defaultEnabled) {
+  if (typeof value === "boolean") return { enabled: value };
+  if (isPlainObject(value)) {
+    return { ...value, enabled: value.enabled !== false };
+  }
+  return { enabled: defaultEnabled };
+}
+
+function readMemorySnapshot(repoPath, value) {
+  const memory = normalizeMemoryConfig(value);
+  if (!memory) return [];
+  const paths = [
+    memory.notesPath,
+    memory.doNotRepeatPath,
+    memory.paperIdeasPath,
+    memory.campaignsPath,
+    memory.experimentsPath,
+    ...memory.referencePaths
+  ];
+  const uniquePaths = [...new Set(paths.filter(Boolean))];
+  return uniquePaths.map((relativePath) => summarizeMemoryPath(repoPath, relativePath));
+}
+
+function summarizeMemoryPath(repoPath, relativePath) {
+  const normalized = normalizeRelativePath(relativePath);
+  try {
+    const absolutePath = safeResolveRepoPath(repoPath, normalized);
+    if (!fs.existsSync(absolutePath)) {
+      return { path: normalized, status: "missing" };
+    }
+    const stat = fs.statSync(absolutePath);
+    if (stat.isDirectory()) {
+      const entries = fs.readdirSync(absolutePath, { withFileTypes: true })
+        .filter((entry) => !entry.name.startsWith("."))
+        .map((entry) => `${entry.isDirectory() ? "dir " : "file"} ${entry.name}`)
+        .sort()
+        .slice(0, 25);
+      return { path: normalized, status: "directory", entries };
+    }
+    if (!stat.isFile()) {
+      return { path: normalized, status: "not-file" };
+    }
+    const content = safeReadText(absolutePath);
+    return {
+      path: normalized,
+      status: "file",
+      excerpt: tail(content, 6000)
+    };
+  } catch (error) {
+    return {
+      path: normalized,
+      status: "error",
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function formatMemoryPaths(memory) {
+  if (!memory) return "- disabled";
+  const paths = [
+    ["notes", memory.notesPath],
+    ["do-not-repeat", memory.doNotRepeatPath],
+    ["paper ideas", memory.paperIdeasPath],
+    ["campaigns", memory.campaignsPath],
+    ["experiments", memory.experimentsPath],
+    ["templates", memory.templatesPath],
+    ...memory.referencePaths.map((item) => ["reference", item])
+  ];
+  return paths.map(([label, value]) => `- ${label}: ${value}`).join("\n");
+}
+
+function formatMemorySnapshot(snapshot) {
+  if (!Array.isArray(snapshot) || snapshot.length === 0) {
+    return "- none";
+  }
+  return snapshot.map((item) => {
+    if (item.status === "file") {
+      return `## ${item.path}\n${item.excerpt || "(empty)"}`;
+    }
+    if (item.status === "directory") {
+      return `## ${item.path}\n${item.entries.length ? item.entries.map((entry) => `- ${entry}`).join("\n") : "(empty directory)"}`;
+    }
+    if (item.status === "missing") {
+      return `## ${item.path}\n(missing)`;
+    }
+    return `## ${item.path}\n(${item.status}: ${item.error || "not readable"})`;
+  }).join("\n\n").slice(-24000);
+}
+
+function formatRecentExperiments(experiments, count) {
+  return experiments
+    .slice(-count)
+    .map((experiment) => {
+      const metrics = experiment.metrics ? JSON.stringify(experiment.metrics) : "{}";
+      return `- #${experiment.ordinal} ${experiment.status}: ${experiment.hypothesis} metrics=${metrics}`;
+    })
+    .join("\n");
+}
+
+function formatRecentPatches(patches, count) {
+  return patches
+    .slice(0, count)
+    .map((patch) => `- ${patch.status} ${String(patch.contentHash || "").slice(0, 12)} files=${(patch.changedFiles || []).join(", ")}`)
+    .join("\n");
+}
+
+function safeResolveRepoPath(repoPath, relativePath) {
+  const repoRoot = path.resolve(repoPath);
+  const absolutePath = path.resolve(repoRoot, normalizeRelativePath(relativePath));
+  if (absolutePath !== repoRoot && !absolutePath.startsWith(`${repoRoot}${path.sep}`)) {
+    throw new Error(`Path escapes repoPath: ${relativePath}`);
+  }
+  return absolutePath;
+}
+
+function safeReadText(filePath) {
+  const buffer = fs.readFileSync(filePath);
+  if (buffer.includes(0)) {
+    return "[binary file omitted]";
+  }
+  return buffer.toString("utf8");
+}
+
+function normalizeRelativePath(value) {
+  return String(value || "")
+    .replace(/^"|"$/g, "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/g, "");
+}
+
+function tail(value, maxChars) {
+  const text = String(value ?? "");
+  return text.length > maxChars ? text.slice(-maxChars) : text;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function runProcess(command, args, input, cwd) {

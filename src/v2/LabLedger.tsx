@@ -27,8 +27,7 @@ export function LabLedger() {
   const requestMore = useMutation(api.orchestration.requestMoreExperiments);
   const setSessionConcurrency = useMutation(api.orchestration.setSessionConcurrency);
   const setWorkerControl = useMutation(api.orchestration.setWorkerControl);
-  const seedDemo = useMutation(api.orchestration.seedControlPlaneDemo);
-  const createSession = useMutation(api.orchestration.createResearchSession);
+  const registerSession = useMutation(api.orchestration.registerResearchSession);
 
   const [selectedSessionId, setSelectedSessionId] = useState<string>();
   const [selectedExperimentId, setSelectedExperimentId] = useState<string | undefined>();
@@ -106,7 +105,6 @@ export function LabLedger() {
         {!session ? (
           <EmptyShell
             sessions={sessions}
-            onSeed={() => void seedDemo()}
             onNewSession={() => setIsNewSessionOpen(true)}
           />
         ) : (
@@ -216,7 +214,7 @@ export function LabLedger() {
         <NewSessionDialog
           onClose={() => setIsNewSessionOpen(false)}
           onCreate={async (payload: NewSessionPayload) => {
-            const sessionId = await createSession(payload as any);
+            const sessionId = await registerSession(payload as any);
             setSelectedSessionId(String(sessionId));
             setSelectedExperimentId(undefined);
             setDiffPatchId(undefined);
@@ -229,11 +227,9 @@ export function LabLedger() {
 
 function EmptyShell({
   sessions,
-  onSeed,
   onNewSession,
 }: {
   sessions: any[] | undefined;
-  onSeed: () => void;
   onNewSession: () => void;
 }) {
   return (
@@ -250,14 +246,11 @@ function EmptyShell({
         {sessions === undefined ? "loading sessions…" : "no research sessions yet"}
       </p>
       <p style={{ color: "var(--ink-3)", fontSize: 14, marginBottom: 18 }}>
-        seed the demo to see the ledger come alive.
+        register a session to see the ledger come alive.
       </p>
       <div className="empty-actions">
         <button type="button" className="btn btn-primary" onClick={onNewSession}>
           new session
-        </button>
-        <button type="button" className="btn btn-quiet" onClick={onSeed}>
-          seed demo session
         </button>
       </div>
     </div>

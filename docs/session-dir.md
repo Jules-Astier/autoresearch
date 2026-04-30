@@ -71,6 +71,11 @@ environment instead.
     "model": "gpt-5.4",
     "effort": "high"
   },
+  "memory": {
+    "enabled": true,
+    "rootPath": "research",
+    "referencePaths": ["references"]
+  },
   "metricContract": {
     "rankingMode": "lexicographic",
     "metrics": [
@@ -94,6 +99,45 @@ repository root.
 The benchmark command runs inside an isolated copy or git worktree of the target
 repository. The runner accepts metrics from the last JSON object printed by the
 benchmark or from lines shaped like `metric_name: 1.23`.
+
+## Durable Research Memory
+
+Add a `memory` block to make researcher and memory-keeper roles first-class for
+a session:
+
+```json
+{
+  "memory": {
+    "enabled": true,
+    "rootPath": "research",
+    "notesPath": "research/notes.md",
+    "doNotRepeatPath": "research/do-not-repeat.md",
+    "paperIdeasPath": "research/paper-ideas.md",
+    "campaignsPath": "research/campaigns",
+    "experimentsPath": "research/experiments",
+    "templatesPath": "research/templates",
+    "referencePaths": ["references", "docs/papers"],
+    "researcher": { "enabled": true },
+    "memoryKeeper": { "enabled": true }
+  }
+}
+```
+
+All `memory` paths are relative to `repoPath`, not the session directory. When a
+planning cycle starts, the orchestrator optionally runs a read-only researcher
+before the planner. The researcher reads the configured memory and reference
+paths, rejects duplicates and stale ideas, and emits candidate single-change
+hypotheses for the planner and reviewer.
+
+After a run completes or fails inside the runner, the memory keeper optionally
+updates the configured memory files in the target repo. It is prompted to edit
+only the memory paths, preserve the hypothesis, base reference, metrics or
+failure state, current-best decision, and a short interpretation, and turn
+regressions or invalid runs into concise do-not-repeat guidance.
+
+If `memory` is omitted or `memory.enabled` is `false`, the researcher and memory
+keeper are skipped. Individual roles can be disabled with
+`memory.researcher.enabled: false` or `memory.memoryKeeper.enabled: false`.
 
 ## TikZ Architecture Artifacts
 

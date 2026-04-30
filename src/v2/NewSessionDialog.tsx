@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { FolderOpen, Loader2, X } from "lucide-react";
+import { CheckCircle2, FileJson, FolderOpen, Loader2, RefreshCw, X } from "lucide-react";
 
 export type NewSessionPayload = {
   slug: string;
@@ -14,15 +14,21 @@ export type NewSessionPayload = {
     primaryMetric?: string;
     direction?: "minimize" | "maximize";
     rankingMode?: "lexicographic" | "weighted_score" | string;
-    metrics: Array<{
+    metrics?: Array<{
       name: string;
       direction: "minimize" | "maximize";
       role?: "objective" | "constraint" | string;
+      [key: string]: unknown;
     }>;
+    [key: string]: unknown;
   };
   baseRef?: string;
+  metricParserCommand?: string;
   runtimeConfigPaths?: string[];
   modelIoContract?: string;
+  agent?: unknown;
+  sandbox?: unknown;
+  earlyStopping?: unknown;
 };
 
 type Props = {
@@ -30,51 +36,20 @@ type Props = {
   onCreate: (payload: NewSessionPayload) => Promise<void>;
 };
 
-type Draft = {
-  workspacePath: string;
-  title: string;
-  slug: string;
-  baseRef: string;
-  benchmarkCommand: string;
-  targetExperimentCount: string;
-  maxConcurrentRuns: string;
-  editablePaths: string;
-  immutablePaths: string;
-  runtimeConfigPaths: string;
-  modelIoContract: string;
-  topObjectiveMetric: string;
-  direction: "minimize" | "maximize";
-};
-
-const initialDraft: Draft = {
-  workspacePath: "",
-  title: "",
-  slug: "",
-  baseRef: "HEAD",
-  benchmarkCommand: "",
-  targetExperimentCount: "20",
-  maxConcurrentRuns: "1",
-  editablePaths: "src/**",
-  immutablePaths: "data/**",
-  runtimeConfigPaths: "",
-  modelIoContract: "Preserve the existing public inputs and metric output.",
-  topObjectiveMetric: "",
-  direction: "minimize",
+type LoadResponse = {
+  payload?: NewSessionPayload;
+  error?: string;
 };
 
 export function NewSessionDialog({ onClose, onCreate }: Props) {
-  const [draft, setDraft] = useState<Draft>(initialDraft);
+  const [sessionDir, setSessionDir] = useState("");
+  const [payload, setPayload] = useState<NewSessionPayload | null>(null);
   const [isPicking, setIsPicking] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canSubmit = !isCreating;
-
-  function update<K extends keyof Draft>(key: K, value: Draft[K]) {
-    setDraft((current) => ({ ...current, [key]: value }));
-  }
-
-  async function pickWorkspace() {
+  async function pickSessionDirectory() {
     setError(null);
     setIsPicking(true);
     try {
@@ -86,62 +61,56 @@ export function NewSessionDialog({ onClose, onCreate }: Props) {
       if (!body.path) {
         return;
       }
-
-      const name = leafName(body.path);
-      setDraft((current) => ({
-        ...current,
-        workspacePath: body.path ?? "",
-        title: current.title || titleFromName(name),
-        slug: current.slug || slugify(name),
-      }));
+      setSessionDir(body.path);
+      await loadSessionDirectory(body.path);
     } catch (pickError) {
       const message =
         pickError instanceof Error ? pickError.message : "Folder picker failed.";
-      setError(`${message} You can paste an absolute path instead.`);
+      setError(`${message} You can paste a session directory path instead.`);
     } finally {
       setIsPicking(false);
     }
   }
 
+  async function loadSessionDirectory(path: string = sessionDir) {
+    const trimmed = path.trim();
+    if (!trimmed) {
+      setError("Choose a session directory containing session.json.");
+      setPayload(null);
+      return;
+    }
+
+    setError(null);
+    setIsLoading(true);
+    try {
+      const response = await fetch("/api/local/read-session-directory", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: trimmed }),
+      });
+      const body = (await response.json()) as LoadResponse;
+      if (!response.ok || !body.payload) {
+        throw new Error(body.error || "Could not read session.json.");
+      }
+      setPayload(body.payload);
+    } catch (loadError) {
+      setPayload(null);
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const problems = validateDraft(draft);
-    if (problems.length > 0) {
-      setError(problems[0]);
+    if (!payload) {
+      setError("Load a session directory before creating the session.");
       return;
     }
 
     setError(null);
     setIsCreating(true);
     try {
-      const payload: NewSessionPayload = {
-        slug: slugify(draft.slug),
-        title: draft.title.trim(),
-        repoPath: draft.workspacePath.trim(),
-        benchmarkCommand: draft.benchmarkCommand.trim(),
-        targetExperimentCount: parsePositiveInteger(draft.targetExperimentCount),
-        maxConcurrentRuns: parseNonNegativeInteger(draft.maxConcurrentRuns),
-        editablePaths: pathList(draft.editablePaths),
-        immutablePaths: pathList(draft.immutablePaths),
-        metricContract: {
-          rankingMode: "lexicographic",
-          metrics: [
-            {
-              name: draft.topObjectiveMetric.trim(),
-              direction: draft.direction,
-              role: "objective",
-            },
-          ],
-        },
-      };
-
-      const baseRef = draft.baseRef.trim();
-      const runtimeConfigPaths = pathList(draft.runtimeConfigPaths);
-      const modelIoContract = draft.modelIoContract.trim();
-      if (baseRef) payload.baseRef = baseRef;
-      if (runtimeConfigPaths.length > 0) payload.runtimeConfigPaths = runtimeConfigPaths;
-      if (modelIoContract) payload.modelIoContract = modelIoContract;
-
       await onCreate(payload);
       onClose();
     } catch (createError) {
@@ -165,7 +134,7 @@ export function NewSessionDialog({ onClose, onCreate }: Props) {
           <div>
             <div className="modal-meta">session intake</div>
             <h2 className="modal-title" id="new-session-title">
-              new research session
+              register research session
             </h2>
           </div>
           <button type="button" className="btn btn-quiet icon-btn" onClick={onClose}>
@@ -175,148 +144,40 @@ export function NewSessionDialog({ onClose, onCreate }: Props) {
         </div>
 
         <div className="modal-body new-session-body">
-          <div className="new-session-grid">
-            <label className="field new-session-wide">
-              <span className="field-label">base workspace folder</span>
-              <span className="path-row">
-                <input
-                  className="input path-input"
-                  value={draft.workspacePath}
-                  onChange={(event) => update("workspacePath", event.target.value)}
-                  placeholder="/absolute/path/to/repo"
-                />
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={pickWorkspace}
-                  disabled={isPicking || isCreating}
-                >
-                  {isPicking ? <Loader2 size={13} className="spin" /> : <FolderOpen size={13} />}
-                  browse
-                </button>
-              </span>
-            </label>
-
-            <label className="field">
-              <span className="field-label">title</span>
+          <label className="field">
+            <span className="field-label">session folder</span>
+            <span className="path-row">
               <input
-                className="input"
-                value={draft.title}
-                onChange={(event) => update("title", event.target.value)}
+                className="input path-input"
+                value={sessionDir}
+                onChange={(event) => {
+                  setSessionDir(event.target.value);
+                  setPayload(null);
+                }}
+                placeholder="/absolute/path/to/session-dir"
               />
-            </label>
-
-            <label className="field">
-              <span className="field-label">slug</span>
-              <input
-                className="input"
-                value={draft.slug}
-                onChange={(event) => update("slug", event.target.value)}
-                onBlur={() => update("slug", slugify(draft.slug))}
-              />
-            </label>
-
-            <label className="field">
-              <span className="field-label">benchmark command</span>
-              <input
-                className="input"
-                value={draft.benchmarkCommand}
-                onChange={(event) => update("benchmarkCommand", event.target.value)}
-                placeholder="npm test -- --json"
-              />
-            </label>
-
-            <label className="field">
-              <span className="field-label">base ref</span>
-              <input
-                className="input"
-                value={draft.baseRef}
-                onChange={(event) => update("baseRef", event.target.value)}
-              />
-            </label>
-
-            <label className="field">
-              <span className="field-label">target experiments</span>
-              <input
-                className="input"
-                type="number"
-                min={1}
-                value={draft.targetExperimentCount}
-                onChange={(event) => update("targetExperimentCount", event.target.value)}
-              />
-            </label>
-
-            <label className="field">
-              <span className="field-label">max runners</span>
-              <input
-                className="input"
-                type="number"
-                min={0}
-                value={draft.maxConcurrentRuns}
-                onChange={(event) => update("maxConcurrentRuns", event.target.value)}
-              />
-            </label>
-
-            <label className="field">
-              <span className="field-label">top objective</span>
-              <input
-                className="input"
-                value={draft.topObjectiveMetric}
-                onChange={(event) => update("topObjectiveMetric", event.target.value)}
-                placeholder="validation_loss"
-              />
-            </label>
-
-            <label className="field">
-              <span className="field-label">direction</span>
-              <select
-                className="select"
-                value={draft.direction}
-                onChange={(event) =>
-                  update("direction", event.target.value as Draft["direction"])
-                }
+              <button
+                type="button"
+                className="btn"
+                onClick={pickSessionDirectory}
+                disabled={isPicking || isLoading || isCreating}
               >
-                <option value="minimize">minimize</option>
-                <option value="maximize">maximize</option>
-              </select>
-            </label>
+                {isPicking ? <Loader2 size={13} className="spin" /> : <FolderOpen size={13} />}
+                browse
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void loadSessionDirectory()}
+                disabled={isPicking || isLoading || isCreating}
+              >
+                {isLoading ? <Loader2 size={13} className="spin" /> : <RefreshCw size={13} />}
+                load
+              </button>
+            </span>
+          </label>
 
-            <label className="field new-session-wide">
-              <span className="field-label">editable paths</span>
-              <textarea
-                className="input textarea"
-                value={draft.editablePaths}
-                onChange={(event) => update("editablePaths", event.target.value)}
-              />
-            </label>
-
-            <label className="field">
-              <span className="field-label">immutable paths</span>
-              <textarea
-                className="input textarea"
-                value={draft.immutablePaths}
-                onChange={(event) => update("immutablePaths", event.target.value)}
-              />
-            </label>
-
-            <label className="field">
-              <span className="field-label">runtime config paths</span>
-              <textarea
-                className="input textarea"
-                value={draft.runtimeConfigPaths}
-                onChange={(event) => update("runtimeConfigPaths", event.target.value)}
-              />
-            </label>
-
-            <label className="field new-session-wide">
-              <span className="field-label">model io contract</span>
-              <textarea
-                className="input textarea"
-                value={draft.modelIoContract}
-                onChange={(event) => update("modelIoContract", event.target.value)}
-              />
-            </label>
-          </div>
+          {payload ? <ContractPreview payload={payload} /> : <EmptyContractPreview />}
 
           {error ? <div className="form-error">{error}</div> : null}
         </div>
@@ -325,9 +186,9 @@ export function NewSessionDialog({ onClose, onCreate }: Props) {
           <button type="button" className="btn btn-quiet" onClick={onClose}>
             cancel
           </button>
-          <button type="submit" className="btn btn-primary" disabled={!canSubmit}>
-            {isCreating ? <Loader2 size={13} className="spin" /> : null}
-            create session
+          <button type="submit" className="btn btn-primary" disabled={!payload || isCreating}>
+            {isCreating ? <Loader2 size={13} className="spin" /> : <CheckCircle2 size={13} />}
+            register session
           </button>
         </div>
       </form>
@@ -335,57 +196,114 @@ export function NewSessionDialog({ onClose, onCreate }: Props) {
   );
 }
 
-function validateDraft(draft: Draft): string[] {
-  const problems: string[] = [];
-  if (!draft.workspacePath.trim()) problems.push("Choose a base workspace folder.");
-  if (!draft.title.trim()) problems.push("Add a session title.");
-  if (!draft.slug.trim() || !slugify(draft.slug)) problems.push("Add a session slug.");
-  if (!draft.benchmarkCommand.trim()) problems.push("Add a benchmark command.");
-  if (pathList(draft.editablePaths).length === 0) problems.push("Add at least one editable path.");
-  if (!draft.topObjectiveMetric.trim()) problems.push("Add a top objective.");
-  if (!Number.isInteger(Number(draft.targetExperimentCount)) || Number(draft.targetExperimentCount) < 1) {
-    problems.push("Target experiments must be a positive integer.");
-  }
-  if (!Number.isInteger(Number(draft.maxConcurrentRuns)) || Number(draft.maxConcurrentRuns) < 0) {
-    problems.push("Max runners must be a non-negative integer.");
-  }
-  return problems;
+function ContractPreview({ payload }: { payload: NewSessionPayload }) {
+  const objective = objectiveSummary(payload.metricContract);
+  const metricCount = payload.metricContract.metrics?.length ?? 0;
+
+  return (
+    <section className="contract-preview" aria-label="Loaded session contract">
+      <div className="contract-head">
+        <FileJson size={15} />
+        <span>session.json</span>
+        <span className="contract-status">loaded</span>
+      </div>
+
+      <div className="contract-grid">
+        <ContractItem label="title" value={payload.title} />
+        <ContractItem label="slug" value={payload.slug} />
+        <ContractItem label="repo path" value={payload.repoPath} wide />
+        <ContractItem label="benchmark" value={payload.benchmarkCommand} wide />
+        <ContractItem label="base ref" value={payload.baseRef || "HEAD"} />
+        <ContractItem
+          label="experiments"
+          value={`${payload.targetExperimentCount} target · ${payload.maxConcurrentRuns} runner${
+            payload.maxConcurrentRuns === 1 ? "" : "s"
+          }`}
+        />
+        <ContractItem
+          label="objective"
+          value={`${objective.name || "unspecified"} · ${objective.direction || "unknown"}`}
+        />
+        <ContractItem
+          label="metrics"
+          value={`${metricCount || 1} metric${metricCount === 1 ? "" : "s"} · ${
+            payload.metricContract.rankingMode || "primary"
+          }`}
+        />
+        <ContractList label="editable paths" values={payload.editablePaths} />
+        <ContractList label="immutable paths" values={payload.immutablePaths} />
+        <ContractList
+          label="runtime config paths"
+          values={payload.runtimeConfigPaths ?? []}
+        />
+        <ContractItem
+          label="model io contract"
+          value={payload.modelIoContract || "not declared"}
+          wide
+        />
+      </div>
+    </section>
+  );
 }
 
-function pathList(value: string): string[] {
-  return value
-    .split(/\r?\n/u)
-    .map((item) => item.trim())
-    .filter(Boolean);
+function EmptyContractPreview() {
+  return (
+    <div className="contract-empty">
+      <FileJson size={16} />
+      <span>no session.json loaded</span>
+    </div>
+  );
 }
 
-function parsePositiveInteger(value: string): number {
-  return Math.max(1, Number.parseInt(value, 10));
+function ContractItem({
+  label,
+  value,
+  wide,
+}: {
+  label: string;
+  value: string;
+  wide?: boolean;
+}) {
+  return (
+    <div className={`contract-item ${wide ? "wide" : ""}`}>
+      <span className="field-label">{label}</span>
+      <span className="contract-value">{value}</span>
+    </div>
+  );
 }
 
-function parseNonNegativeInteger(value: string): number {
-  return Math.max(0, Number.parseInt(value, 10));
+function ContractList({ label, values }: { label: string; values: string[] }) {
+  return (
+    <div className="contract-item">
+      <span className="field-label">{label}</span>
+      {values.length > 0 ? (
+        <span className="contract-list">
+          {values.map((value) => (
+            <code key={value}>{value}</code>
+          ))}
+        </span>
+      ) : (
+        <span className="contract-value muted">none</span>
+      )}
+    </div>
+  );
 }
 
-function leafName(value: string): string {
-  const normalized = value.replace(/[\\/]+$/u, "");
-  const parts = normalized.split(/[\\/]/u).filter(Boolean);
-  return parts.at(-1) || "workspace";
-}
+function objectiveSummary(metricContract: NewSessionPayload["metricContract"]) {
+  const primaryMetric = metricContract.primaryMetric;
+  const topObjective = metricContract.metrics?.find(
+    (metric) => String(metric.role ?? "objective") !== "constraint",
+  );
+  const primarySpec = metricContract.metrics?.find(
+    (metric) => metric.name === primaryMetric,
+  );
 
-function titleFromName(value: string): string {
-  return value
-    .replace(/[-_]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim()
-    .replace(/\b\w/gu, (letter) => letter.toUpperCase());
-}
-
-function slugify(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/gu, "-")
-    .replace(/^-+|-+$/gu, "")
-    .slice(0, 64);
+  return {
+    name: primaryMetric || topObjective?.name || metricContract.metrics?.[0]?.name,
+    direction:
+      metricContract.direction ||
+      primarySpec?.direction ||
+      topObjective?.direction ||
+      metricContract.metrics?.[0]?.direction,
+  };
 }

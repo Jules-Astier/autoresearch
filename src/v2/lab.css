@@ -970,6 +970,85 @@ body.lab-frontier-scroll-locked {
   flex: 1;
   min-width: 0;
 }
+.lab-ledger .contract-preview {
+  margin-top: 18px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-md);
+  background: var(--paper-1);
+  overflow: hidden;
+}
+.lab-ledger .contract-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink-2);
+  font-family: var(--face-mono);
+  font-size: 12px;
+}
+.lab-ledger .contract-status {
+  margin-left: auto;
+  color: var(--moss);
+}
+.lab-ledger .contract-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--rule-soft);
+}
+.lab-ledger .contract-item {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 12px 14px;
+  background: var(--paper-2);
+}
+.lab-ledger .contract-item.wide {
+  grid-column: 1 / -1;
+}
+.lab-ledger .contract-value {
+  min-width: 0;
+  color: var(--ink-1);
+  font-family: var(--face-mono);
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.lab-ledger .contract-value.muted {
+  color: var(--ink-4);
+  font-style: italic;
+}
+.lab-ledger .contract-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lab-ledger .contract-list code {
+  max-width: 100%;
+  padding: 3px 6px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
+  background: var(--paper-inset);
+  color: var(--ink-2);
+  font-family: var(--face-mono);
+  font-size: 12px;
+  word-break: break-word;
+}
+.lab-ledger .contract-empty {
+  margin-top: 18px;
+  min-height: 118px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed var(--rule);
+  border-radius: var(--r-md);
+  color: var(--ink-4);
+  font-family: var(--face-mono);
+  font-size: 13px;
+  background: var(--paper-1);
+}
 .lab-ledger .form-error {
   margin-top: 16px;
   padding: 10px 12px;
@@ -1009,6 +1088,9 @@ body.lab-frontier-scroll-locked {
     flex-direction: column;
   }
   .lab-ledger .new-session-grid {
+    grid-template-columns: 1fr;
+  }
+  .lab-ledger .contract-grid {
     grid-template-columns: 1fr;
   }
   .lab-ledger .modal-backdrop {
