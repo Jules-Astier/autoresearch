@@ -1,0 +1,42 @@
+{
+  "name": "autoresearch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "autoresearch": "./bin/autoresearch.mjs"
+  },
+  "scripts": {
+    "register": "node bin/autoresearch.mjs register",
+    "start": "node scripts/dev-stack.mjs",
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "dev:stack": "node scripts/dev-stack.mjs",
+    "dev:all": "node scripts/dev-stack.mjs",
+    "convex:dev:local": "CONVEX_AGENT_MODE=anonymous convex dev --local",
+    "convex:codegen": "convex codegen",
+    "convex:seed": "convex run orchestration:seedControlPlaneDemo",
+    "orchestrator:codex": "node scripts/codex-orchestrator.mjs",
+    "runner:codex": "node scripts/codex-runner.mjs",
+    "test:promotion-history": "node scripts/test-promotion-history.mjs",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173"
+  },
+  "dependencies": {
+    "@convex-dev/agent": "^0.6.1",
+    "@vitejs/plugin-react": "^5.1.1",
+    "convex": "^1.36.1",
+    "lucide-react": "^0.555.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "vite": "^7.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.4.22",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.18",
+    "typescript": "^5.9.3"
+  }
+}

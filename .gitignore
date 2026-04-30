@@ -1,0 +1,7 @@
+
+.env.local
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+.convex/local/
+.DS_Store

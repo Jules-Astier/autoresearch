@@ -1,0 +1,29 @@
+{
+  "slug": "basic-model-search",
+  "title": "Basic model search",
+  "repoPath": "../target-project",
+  "baseRef": "HEAD",
+  "benchmarkCommand": "npm test -- --json",
+  "targetExperimentCount": 10,
+  "maxConcurrentRuns": 1,
+  "editablePaths": [
+    "src/model.ts",
+    "config/tunable.json"
+  ],
+  "immutablePaths": [
+    "data/**",
+    "config/fixed.json"
+  ],
+  "runtimeConfigPaths": [
+    "config/tunable.json"
+  ],
+  "modelIoContract": "Preserve the existing command line interface and metric output.",
+  "metricContract": {
+    "primaryMetric": "validation_loss",
+    "direction": "minimize",
+    "metrics": [
+      { "name": "validation_loss", "direction": "minimize" },
+      { "name": "accuracy", "direction": "maximize" }
+    ]
+  }
+}
