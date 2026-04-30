@@ -8,7 +8,6 @@
  * @module
  */
 
-import type * as autoresearch from "../autoresearch.js";
 import type * as orchestration from "../orchestration.js";
 import type * as promotionHistory from "../promotionHistory.js";
 
@@ -19,7 +18,6 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
-  autoresearch: typeof autoresearch;
   orchestration: typeof orchestration;
   promotionHistory: typeof promotionHistory;
 }>;

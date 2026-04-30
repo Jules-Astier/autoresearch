@@ -1,5 +1,4 @@
-// Lab-ledger formatting helpers. Kept separate from the existing
-// `utils/format.ts` so the two dashboards don't share style decisions.
+// Lab-ledger formatting helpers.
 
 export function formatMetricValue(value: number | undefined): string {
   if (value === undefined || Number.isNaN(value)) return "—";

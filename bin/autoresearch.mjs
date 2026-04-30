@@ -79,7 +79,9 @@ function normalizeSessionContract(contract, sessionDir) {
     immutablePaths: stringArray(contract.immutablePaths, "immutablePaths"),
     runtimeConfigPaths: stringArray(contract.runtimeConfigPaths, "runtimeConfigPaths"),
     modelIoContract: optionalString(contract.modelIoContract),
+    agent: normalizeAgentConfig(contract.agent),
     metricContract,
+    sandbox: normalizeSandboxConfig(contract.sandbox),
     earlyStopping: contract.earlyStopping
   };
 }
@@ -101,6 +103,49 @@ function normalizeMetricContract(contract) {
       ? contract.metrics
       : [{ name: primaryMetric, direction }]
   };
+}
+
+function normalizeSandboxConfig(value) {
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainObject(value)) {
+    throw new Error("sandbox must be an object when provided");
+  }
+  const backend = optionalString(value.backend)?.toLowerCase();
+  if (backend !== undefined && backend !== "sandcastle" && backend !== "direct") {
+    throw new Error("sandbox.backend must be sandcastle or direct");
+  }
+  const provider = optionalString(value.provider)?.toLowerCase();
+  if (provider !== undefined && provider !== "docker" && provider !== "podman") {
+    throw new Error("sandbox.provider must be docker or podman");
+  }
+  const normalized = { ...value };
+  if (backend === undefined) delete normalized.backend;
+  else normalized.backend = backend;
+  if (provider === undefined) delete normalized.provider;
+  else normalized.provider = provider;
+  return normalized;
+}
+
+function normalizeAgentConfig(value) {
+  if (value === undefined || value === null) return undefined;
+  if (!isPlainObject(value)) {
+    throw new Error("agent must be an object when provided");
+  }
+  const provider = optionalString(value.provider)?.toLowerCase();
+  if (
+    provider !== undefined &&
+    provider !== "codex" &&
+    provider !== "claude-code" &&
+    provider !== "claude" &&
+    provider !== "opencode" &&
+    provider !== "pi"
+  ) {
+    throw new Error("agent.provider must be codex, claude-code, opencode, or pi");
+  }
+  const normalized = { ...value };
+  if (provider === undefined) delete normalized.provider;
+  else normalized.provider = provider;
+  return normalized;
 }
 
 function resolveContractPath(value, sessionDir) {
@@ -144,6 +189,10 @@ function requiredNonNegativeInteger(value, field) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${field} must be a non-negative integer`);
   return parsed;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function runScript(script, argv) {

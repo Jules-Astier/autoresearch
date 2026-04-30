@@ -1,0 +1,47 @@
+{
+  "slug": "basic-model-search-sandcastle",
+  "title": "Basic model search with Sandcastle",
+  "repoPath": "../target-project",
+  "baseRef": "HEAD",
+  "benchmarkCommand": "npm test -- --json",
+  "targetExperimentCount": 10,
+  "maxConcurrentRuns": 1,
+  "editablePaths": [
+    "src/model.ts",
+    "config/tunable.json"
+  ],
+  "immutablePaths": [
+    "data/**",
+    "config/fixed.json"
+  ],
+  "runtimeConfigPaths": [
+    "config/tunable.json"
+  ],
+  "modelIoContract": "Preserve the existing command line interface and metric output.",
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "effort": "high",
+    "envVars": ["OPENAI_API_KEY"]
+  },
+  "metricContract": {
+    "primaryMetric": "validation_loss",
+    "direction": "minimize",
+    "metrics": [
+      { "name": "validation_loss", "direction": "minimize" },
+      { "name": "accuracy", "direction": "maximize" }
+    ]
+  },
+  "sandbox": {
+    "backend": "sandcastle",
+    "provider": "docker",
+    "imageName": "sandcastle:target-project",
+    "setupCommand": "npm ci",
+    "mounts": [
+      {
+        "hostPath": "~/.npm",
+        "sandboxPath": "~/.npm"
+      }
+    ]
+  }
+}

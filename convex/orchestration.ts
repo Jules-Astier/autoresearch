@@ -19,7 +19,9 @@ const createSessionArgs = {
   immutablePaths: v.array(v.string()),
   runtimeConfigPaths: v.optional(v.array(v.string())),
   modelIoContract: v.optional(v.string()),
+  agent: v.optional(v.any()),
   metricContract: v.any(),
+  sandbox: v.optional(v.any()),
   earlyStopping: v.optional(v.any()),
 };
 
@@ -60,6 +62,11 @@ export const getSessionDetail = query({
       .take(80);
     const patches = await ctx.db
       .query("researchPatches")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .order("desc")
+      .take(80);
+    const artifacts = await ctx.db
+      .query("researchArtifacts")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .order("desc")
       .take(80);
@@ -107,6 +114,7 @@ export const getSessionDetail = query({
       events,
       messages,
       patches,
+      artifacts,
       planningCycles,
       rollbacks,
       activeRun,
@@ -162,7 +170,9 @@ export const createResearchSession = mutation({
       immutablePaths: args.immutablePaths,
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
       modelIoContract: args.modelIoContract,
+      agent: args.agent,
       metricContract: args.metricContract,
+      sandbox: args.sandbox,
       earlyStopping: args.earlyStopping,
       createdAtUtc: now,
       updatedAtUtc: now,
@@ -206,7 +216,9 @@ export const registerResearchSession = mutation({
         immutablePaths: args.immutablePaths,
         runtimeConfigPaths: args.runtimeConfigPaths ?? [],
         modelIoContract: args.modelIoContract,
+        agent: args.agent,
         metricContract: args.metricContract,
+        sandbox: args.sandbox,
         earlyStopping: args.earlyStopping,
         createdAtUtc: now,
         updatedAtUtc: now,
@@ -232,7 +244,9 @@ export const registerResearchSession = mutation({
       immutablePaths: args.immutablePaths,
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
       modelIoContract: args.modelIoContract,
+      agent: args.agent,
       metricContract: args.metricContract,
+      sandbox: args.sandbox,
       earlyStopping: args.earlyStopping,
       updatedAtUtc: now,
     });
@@ -258,7 +272,9 @@ export const updateResearchSessionContract = mutation({
     immutablePaths: v.optional(v.array(v.string())),
     runtimeConfigPaths: v.optional(v.array(v.string())),
     modelIoContract: v.optional(v.string()),
+    agent: v.optional(v.any()),
     metricContract: v.optional(v.any()),
+    sandbox: v.optional(v.any()),
     earlyStopping: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
@@ -274,8 +290,12 @@ export const updateResearchSessionContract = mutation({
       patch.runtimeConfigPaths = args.runtimeConfigPaths;
     if (args.modelIoContract !== undefined)
       patch.modelIoContract = args.modelIoContract;
+    if (args.agent !== undefined)
+      patch.agent = args.agent;
     if (args.metricContract !== undefined)
       patch.metricContract = args.metricContract;
+    if (args.sandbox !== undefined)
+      patch.sandbox = args.sandbox;
     if (args.earlyStopping !== undefined)
       patch.earlyStopping = args.earlyStopping;
     await ctx.db.patch(args.sessionId, patch);
@@ -742,6 +762,52 @@ export const recordPatch = mutation({
       },
     });
     return { patchId, status, rejectionReason };
+  },
+});
+
+export const recordResearchArtifact = mutation({
+  args: {
+    runId: v.id("researchRuns"),
+    kind: v.string(),
+    sourcePath: v.string(),
+    path: v.string(),
+    mimeType: v.string(),
+    byteLength: v.float64(),
+    bytes: v.bytes(),
+    contentHash: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const run = await mustGetRun(ctx, args.runId);
+    const now = nowUtc();
+    const artifactId = await ctx.db.insert("researchArtifacts", {
+      sessionId: run.sessionId,
+      experimentId: run.experimentId,
+      runId: args.runId,
+      kind: args.kind,
+      sourcePath: args.sourcePath,
+      path: args.path,
+      mimeType: args.mimeType,
+      byteLength: args.byteLength,
+      bytes: args.bytes,
+      contentHash: args.contentHash,
+      createdAtUtc: now,
+    });
+    await insertEvent(ctx, {
+      sessionId: run.sessionId,
+      experimentId: run.experimentId,
+      runId: args.runId,
+      type: "artifact.stored",
+      message: `Stored ${args.kind} artifact ${args.path}`,
+      payload: {
+        artifactId,
+        sourcePath: args.sourcePath,
+        path: args.path,
+        mimeType: args.mimeType,
+        byteLength: args.byteLength,
+        contentHash: args.contentHash,
+      },
+    });
+    return artifactId;
   },
 });
 

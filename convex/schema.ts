@@ -72,7 +72,9 @@ export default defineSchema({
     immutablePaths: v.array(v.string()),
     runtimeConfigPaths: v.array(v.string()),
     modelIoContract: v.optional(v.string()),
+    agent: v.optional(v.any()),
     metricContract: v.any(),
+    sandbox: v.optional(v.any()),
     earlyStopping: v.optional(v.any()),
     bestExperimentId: v.optional(v.id("researchExperiments")),
     bestScore: v.optional(v.float64()),
@@ -147,6 +149,23 @@ export default defineSchema({
   })
     .index("by_run", ["runId"])
     .index("by_experiment", ["experimentId"])
+    .index("by_session", ["sessionId", "createdAtUtc"]),
+
+  researchArtifacts: defineTable({
+    sessionId: v.id("researchSessions"),
+    experimentId: v.id("researchExperiments"),
+    runId: v.id("researchRuns"),
+    kind: v.string(),
+    sourcePath: v.string(),
+    path: v.string(),
+    mimeType: v.string(),
+    byteLength: v.float64(),
+    bytes: v.bytes(),
+    contentHash: v.string(),
+    createdAtUtc: v.string()
+  })
+    .index("by_run", ["runId", "createdAtUtc"])
+    .index("by_experiment", ["experimentId", "createdAtUtc"])
     .index("by_session", ["sessionId", "createdAtUtc"]),
 
   researchPlanningCycles: defineTable({

@@ -2,7 +2,6 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { AlertTriangle } from "lucide-react";
 import { ConvexProvider, ConvexReactClient } from "convex/react";
-import { App } from "./App";
 import { LabLedger } from "./v2/LabLedger";
 import "./index.css";
 
@@ -29,18 +28,11 @@ function MissingConvexConfig() {
   );
 }
 
-function Routed() {
-  // Pathname-based routing — keeps the parallel dashboard hidden behind /test-ui/
-  // until it's ready to replace the existing one.
-  const isLab = window.location.pathname.replace(/\/+$/, "") === "/test-ui";
-  return isLab ? <LabLedger /> : <App />;
-}
-
 root.render(
   <React.StrictMode>
     {convexUrl ? (
       <ConvexProvider client={new ConvexReactClient(convexUrl)}>
-        <Routed />
+        <LabLedger />
       </ConvexProvider>
     ) : (
       <MissingConvexConfig />

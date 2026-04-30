@@ -37,8 +37,10 @@ npm run convex:seed
   experiments for parallel execution.
 
 Use `npm run orchestrator:codex` to plan and review experiment batches, then use
-`npm run runner:codex` to consume queued experiments and execute `codex exec`
-plus the benchmark.
+`npm run runner:codex` to consume queued experiments. The runner executes
+`codex exec` plus the benchmark directly by default, or uses Sandcastle when the
+registered session has `sandbox.backend: "sandcastle"` or the runner process sets
+`AUTORESEARCH_RUNNER_BACKEND=sandcastle`.
 
 External projects register sessions through
 `orchestration.registerResearchSession`. The CLI reads a session directory,

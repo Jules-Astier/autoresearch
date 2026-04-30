@@ -79,8 +79,10 @@ The required runtime fields are:
 `repoPath` is resolved relative to the session directory when registered.
 Editable and immutable paths are relative to the target repo.
 
-The benchmark command runs inside an isolated workspace. Metrics are parsed from
-the last JSON object in benchmark output or from `metric_name: 1.23` lines.
+The benchmark command runs inside an isolated workspace. Sessions can opt into a
+Sandcastle-backed Docker or Podman sandbox for agent and benchmark execution.
+Metrics are parsed from the last JSON object in benchmark output or from
+`metric_name: 1.23` lines.
 
 ## Useful Commands
 
