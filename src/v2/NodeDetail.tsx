@@ -1,10 +1,19 @@
-import { X, RotateCcw, FileDiff } from "lucide-react";
-import { formatMetricValue, formatDelta, formatRelativeShort, statusGlyph, metricDirection, isImprovement } from "./format";
+import { X, RotateCcw, FileDiff, Image } from "lucide-react";
+import {
+  formatMetricValue,
+  formatDelta,
+  formatRelativeShort,
+  statusGlyph,
+  metricDirection,
+  isImprovement,
+  topObjectiveMetric,
+} from "./format";
 
 type Props = {
   experiment: any;
   runs: any[];
   patches: any[];
+  artifacts: any[];
   bestMetrics?: Record<string, number>;
   metricContract: any;
   isRolledBack: boolean;
@@ -17,6 +26,7 @@ export function NodeDetail({
   experiment,
   runs,
   patches,
+  artifacts,
   bestMetrics,
   metricContract,
   isRolledBack,
@@ -25,15 +35,16 @@ export function NodeDetail({
   onViewDiff,
 }: Props) {
   if (!experiment) return null;
-  const primary = String(metricContract?.primaryMetric ?? "");
-  const direction = metricDirection(metricContract, primary);
+  const topObjective = topObjectiveMetric(metricContract);
 
   const experimentRuns = runs.filter((r) => r.experimentId === experiment._id);
   const experimentPatches = patches.filter((p) => p.experimentId === experiment._id);
+  const experimentArtifacts = artifacts.filter((a) => a.experimentId === experiment._id);
   const status = String(experiment.status ?? "");
 
   const metricEntries = Object.entries(experiment.metrics ?? {}).sort(
-    ([a], [b]) => (a === primary ? -1 : b === primary ? 1 : a.localeCompare(b)),
+    ([a], [b]) =>
+      a === topObjective ? -1 : b === topObjective ? 1 : a.localeCompare(b),
   );
 
   return (
@@ -73,7 +84,7 @@ export function NodeDetail({
                         ? -delta
                         : delta;
                     return (
-                      <tr key={name} className={name === primary ? "primary" : ""}>
+                      <tr key={name} className={name === topObjective ? "primary" : ""}>
                         <td>{name}</td>
                         <td>
                           {formatMetricValue(value)}
@@ -157,6 +168,27 @@ export function NodeDetail({
               </table>
             </div>
           ) : null}
+
+          {experimentArtifacts.length > 0 ? (
+            <div className="sheet-section">
+              <h4>artifacts</h4>
+              <div className="artifact-list">
+                {experimentArtifacts.map((artifact) => (
+                  <figure className="artifact-figure" key={artifact._id}>
+                    <img
+                      className="artifact-image"
+                      src={artifactDataUrl(artifact)}
+                      alt={artifact.sourcePath ?? artifact.path ?? "research artifact"}
+                    />
+                    <figcaption>
+                      <Image size={13} /> {artifact.path}
+                      <span className="mono">{formatBytes(artifact.byteLength)}</span>
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <footer className="sheet-foot">
@@ -173,4 +205,30 @@ export function NodeDetail({
       </aside>
     </>
   );
+}
+
+function artifactDataUrl(artifact: any) {
+  return `data:${artifact.mimeType ?? "image/png"};base64,${bytesToBase64(artifact.bytes)}`;
+}
+
+function bytesToBase64(bytes: ArrayBuffer | Uint8Array | number[]) {
+  const view = bytes instanceof ArrayBuffer
+    ? new Uint8Array(bytes)
+    : ArrayBuffer.isView(bytes)
+      ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      : new Uint8Array(bytes ?? []);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < view.length; index += chunkSize) {
+    binary += String.fromCharCode(...view.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function formatBytes(value: unknown) {
+  const bytes = Number(value ?? 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

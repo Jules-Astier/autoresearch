@@ -78,9 +78,35 @@ export function statusGlyph(status: string): string {
 export function metricDirection(metricContract: any, name: string): "maximize" | "minimize" {
   const list = Array.isArray(metricContract?.metrics) ? metricContract.metrics : [];
   const found = list.find((m: any) => m?.name === name);
-  return String(found?.direction ?? "").toLowerCase() === "maximize"
+  const fallback =
+    name && String(metricContract?.primaryMetric ?? "") === name
+      ? metricContract?.direction
+      : undefined;
+  return String(found?.direction ?? fallback ?? "").toLowerCase() === "maximize"
     ? "maximize"
     : "minimize";
+}
+
+export function objectiveMetricSpecs(metricContract: any): any[] {
+  const list = Array.isArray(metricContract?.metrics) ? metricContract.metrics : [];
+  const objectives = list.filter(
+    (item: any) => String(item?.role ?? "objective") !== "constraint",
+  );
+  if (objectives.length > 0) {
+    return objectives;
+  }
+  const primary = String(metricContract?.primaryMetric ?? "");
+  return primary ? [{ name: primary, direction: metricContract?.direction }] : [];
+}
+
+export function topObjectiveMetric(metricContract: any): string {
+  const objectiveName = objectiveMetricSpecs(metricContract)[0]?.name;
+  if (String(metricContract?.rankingMode ?? "") === "lexicographic") {
+    return String(objectiveName ?? metricContract?.primaryMetric ?? "");
+  }
+  return String(
+    metricContract?.primaryMetric ?? objectiveName ?? "",
+  );
 }
 
 export function isImprovement(

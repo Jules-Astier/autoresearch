@@ -1,0 +1,8 @@
+interface:
+  display_name: "Model Diagram TikZ"
+  short_description: "Publication-grade ML architecture diagrams"
+  brand_color: "#2563EB"
+  default_prompt: "Use $model-diagram-tikz to create a paper-quality TikZ model architecture diagram and compile it to PDF and PNG."
+
+policy:
+  allow_implicit_invocation: true

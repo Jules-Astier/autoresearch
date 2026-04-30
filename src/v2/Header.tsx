@@ -1,11 +1,13 @@
+import { Plus } from "lucide-react";
 import { formatRelativeShort } from "./format";
 
 type Props = {
   isLive: boolean;
   lastUpdate?: string;
+  onNewSession: () => void;
 };
 
-export function Header({ isLive, lastUpdate }: Props) {
+export function Header({ isLive, lastUpdate, onNewSession }: Props) {
   return (
     <header className="header">
       <div className="brand">
@@ -17,6 +19,10 @@ export function Header({ isLive, lastUpdate }: Props) {
           <span>{isLive ? "live" : "idle"}</span>
         </span>
         {lastUpdate ? <span>updated {formatRelativeShort(lastUpdate)}</span> : null}
+        <button type="button" className="btn btn-primary" onClick={onNewSession}>
+          <Plus size={13} />
+          new session
+        </button>
       </div>
     </header>
   );

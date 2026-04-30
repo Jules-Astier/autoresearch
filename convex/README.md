@@ -28,18 +28,22 @@ npm run convex:seed
   surfaces, metric contract, status, continuation state.
 - `researchExperiments`: queued and completed hypotheses.
 - `researchRuns`: local worker attempts for an experiment.
-- `researchRunLogs`: streamed Codex and benchmark output.
+- `researchRunLogs`: streamed agent and benchmark output.
 - `researchAgentMessages`: persisted agent/runner messages for the UI.
 - `researchEvents`: append-only lifecycle events.
 - `researchPatches`: changed files, git diff, diff stat, hash, and rejection
-  reason for every Codex edit attempt.
+  reason for every agent edit attempt.
+- `researchArtifacts`: rendered run artifacts. TikZ diagrams are stored here as
+  PNG bytes only; PDFs are temporary compile intermediates and are not
+  persisted.
 - `researchPlanningCycles`: planner/reviewer batches that enqueue independent
   experiments for parallel execution.
 
 Use `npm run orchestrator:codex` to plan and review experiment batches, then use
-`npm run runner:codex` to consume queued experiments. The runner executes
-`codex exec` plus the benchmark directly by default, or uses Sandcastle when the
-registered session has `sandbox.backend: "sandcastle"` or the runner process sets
+`npm run runner:codex` to consume queued experiments. The runner uses the
+session's `agent.provider` through Sandcastle's agent-provider interface. It runs
+directly on the host by default, or in Sandcastle when the registered session has
+`sandbox.backend: "sandcastle"` or the runner process sets
 `AUTORESEARCH_RUNNER_BACKEND=sandcastle`.
 
 External projects register sessions through
@@ -49,8 +53,8 @@ contract to that mutation.
 
 `researchWorkerControls` stores the desired local runner count. The browser
 updates this row, and `npm run dev:stack` keeps one orchestrator running per
-active session while reconciling the runner count into local Codex subprocesses.
+active session while reconciling the runner count into local agent subprocesses.
 
-The runner records a patch after Codex edits and before benchmarks run. A run can
+The runner records a patch after the agent edits and before benchmarks run. A run can
 complete only when it references an accepted patch, so metrics are always linked
 to a concrete code state.

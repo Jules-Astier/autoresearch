@@ -8,6 +8,8 @@
   },
   "scripts": {
     "register": "node bin/autoresearch.mjs register",
+    "doctor": "node bin/autoresearch.mjs doctor",
+    "install-tex:macos": "node bin/autoresearch.mjs install-tex --macos",
     "start": "node scripts/dev-stack.mjs",
     "dev": "vite --host 127.0.0.1 --port 5173",
     "dev:stack": "node scripts/dev-stack.mjs",

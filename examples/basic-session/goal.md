@@ -1,6 +1,6 @@
 # Goal
 
-Improve the target project's primary validation metric by changing only the
+Improve the target project's ordered validation objectives by changing only the
 declared editable paths.
 
 ## Out Of Scope

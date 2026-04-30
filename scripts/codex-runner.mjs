@@ -53,7 +53,7 @@ async function main() {
   const workerId = args.workerId ?? `${os.hostname()}-${process.pid}`;
   const pollMs = Number(args.pollMs ?? 5000);
 
-  console.log(`Codex runner ${workerId} connected to ${convexUrl}`);
+  console.log(`Agent runner ${workerId} connected to ${convexUrl}`);
   while (true) {
     const claim = await client.mutation(api.orchestration.claimNextExperiment, { workerId });
     if (!claim) {
@@ -86,7 +86,7 @@ async function runClaim(client, claim, args) {
   const { session, basePatch, experiment, runId, priorExperiments } = claim;
   const workspacePath = prepareWorkspace({ session, basePatch, experiment, runId, args });
   const patchBaseRef = gitOutput(["rev-parse", "HEAD"], workspacePath).trim();
-  const prompt = buildCodexPrompt({ session, basePatch, experiment, priorExperiments, workspacePath });
+  const prompt = buildAgentPrompt({ session, basePatch, experiment, priorExperiments, workspacePath });
   const promptPath = path.join(workspacePath, "AUTORESEARCH_PROMPT.md");
   const finalPath = path.join(workspacePath, "AUTORESEARCH_CODEX_FINAL.md");
   const runnerConfig = resolveRunnerConfig(session, args);
@@ -98,7 +98,7 @@ async function runClaim(client, claim, args) {
     experimentId: experiment._id,
     runId,
     role: "system",
-    source: "codex-runner",
+    source: "agent-runner",
     sequence: 1,
     content: `Workspace prepared at ${workspacePath}`
   });
@@ -109,9 +109,9 @@ async function runClaim(client, claim, args) {
       experimentId: experiment._id,
       runId,
       role: "assistant",
-      source: "codex-runner",
+      source: "agent-runner",
       sequence: 2,
-      content: "Dry run: skipped codex and benchmark execution."
+      content: "Dry run: skipped agent and benchmark execution."
     });
     await client.mutation(api.orchestration.completeRun, {
       runId,
@@ -307,7 +307,7 @@ function applyBasePatch(workspacePath, basePatch) {
   }
 }
 
-function buildCodexPrompt({ session, basePatch, experiment, priorExperiments, workspacePath }) {
+function buildAgentPrompt({ session, basePatch, experiment, priorExperiments, workspacePath }) {
   const prior = priorExperiments
     .slice(-12)
     .map((item) => {
@@ -325,7 +325,7 @@ Session:
 - ${session.title}
 - Benchmark command: ${session.benchmarkCommand}
 - Target experiments: ${session.targetExperimentCount}
-- Primary metric contract:
+- Objective priority contract:
 ${JSON.stringify(session.metricContract, null, 2)}
 
 Editable paths:
@@ -1005,8 +1005,177 @@ async function recordSyntheticDryRunPatch(client, { runId, session, workspacePat
   return result.patchId;
 }
 
+async function storeDiagramArtifacts({ client, session, experiment, runId, workspacePath, changedFiles }) {
+  const sources = changedFiles.filter((file) => isTikzSource(workspacePath, file));
+  if (sources.length === 0) {
+    if (requiresDiagramUpdate(session, experiment)) {
+      throw new Error(
+        "architecture_change experiments must update an editable TikZ .tex diagram source"
+      );
+    }
+    return [];
+  }
+
+  const artifactIds = [];
+  for (const sourcePath of sources) {
+    const artifact = compileTikzArtifact(workspacePath, sourcePath);
+    const artifactId = await client.mutation(api.orchestration.recordResearchArtifact, {
+      runId,
+      kind: "model_architecture_png",
+      sourcePath,
+      path: artifact.path,
+      mimeType: "image/png",
+      byteLength: artifact.bytes.byteLength,
+      bytes: bufferToArrayBuffer(artifact.bytes),
+      contentHash: artifact.contentHash
+    });
+    artifactIds.push(artifactId);
+  }
+  return artifactIds;
+}
+
+function requiresDiagramUpdate(session, experiment) {
+  if (String(experiment.changeKind ?? "") !== "architecture_change") {
+    return false;
+  }
+  return (session.editablePaths ?? []).some((pattern) => {
+    const normalized = normalizeRelativePath(pattern).toLowerCase();
+    return normalized.endsWith(".tex") ||
+      normalized.includes("*.tex") ||
+      normalized.includes(".tikz") ||
+      normalized.startsWith("figures/");
+  });
+}
+
+function isTikzSource(workspacePath, file) {
+  const normalized = normalizeRelativePath(file);
+  if (!normalized.toLowerCase().endsWith(".tex")) {
+    return false;
+  }
+  const absolutePath = safeResolveWorkspacePath(workspacePath, normalized);
+  if (!fs.existsSync(absolutePath)) {
+    return false;
+  }
+  const content = safeReadText(absolutePath);
+  return content.includes("\\begin{tikzpicture}") ||
+    content.includes("\\usetikzlibrary") ||
+    /\\documentclass(?:\[[^\]]*\])?\{standalone\}/u.test(content);
+}
+
+function compileTikzArtifact(workspacePath, sourcePath) {
+  const sourceAbsolutePath = safeResolveWorkspacePath(workspacePath, sourcePath);
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "autoresearch-tikz-"));
+  try {
+    const pdfPath = compileTikzPdf(sourceAbsolutePath, tempDir);
+    const png = convertPdfToSizedPng(pdfPath, tempDir);
+    const contentHash = crypto.createHash("sha256").update(png).digest("hex");
+    return {
+      path: artifactPngPath(sourcePath),
+      bytes: png,
+      contentHash
+    };
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+function compileTikzPdf(sourceAbsolutePath, outputDir) {
+  const latexmk = findExecutable("latexmk", [TEX_BIN_DIR]);
+  const pdflatex = findExecutable("pdflatex", [TEX_BIN_DIR]);
+  const cwd = path.dirname(sourceAbsolutePath);
+  if (latexmk) {
+    runCommandOrThrow(latexmk, [
+      "-pdf",
+      "-interaction=nonstopmode",
+      "-halt-on-error",
+      `-outdir=${outputDir}`,
+      sourceAbsolutePath
+    ], cwd);
+  } else if (pdflatex) {
+    runCommandOrThrow(pdflatex, [
+      "-interaction=nonstopmode",
+      "-halt-on-error",
+      `-output-directory=${outputDir}`,
+      sourceAbsolutePath
+    ], cwd);
+  } else {
+    throw new Error("TikZ artifact rendering requires latexmk or pdflatex. Run `autoresearch doctor`.");
+  }
+
+  const pdfPath = path.join(outputDir, `${path.basename(sourceAbsolutePath, ".tex")}.pdf`);
+  if (!fs.existsSync(pdfPath)) {
+    throw new Error(`TikZ artifact rendering did not produce ${pdfPath}`);
+  }
+  return pdfPath;
+}
+
+function convertPdfToSizedPng(pdfPath, tempDir) {
+  const pdftoppm = findExecutable("pdftoppm");
+  const qlmanage = findExecutable("qlmanage");
+  const attempts = pdftoppm
+    ? PDFTOPPM_RESOLUTIONS.map((resolution) => ({ tool: "pdftoppm", value: resolution }))
+    : QUICKLOOK_SIZES.map((size) => ({ tool: "qlmanage", value: size }));
+
+  if (attempts.length === 0 || (!pdftoppm && !qlmanage)) {
+    throw new Error("TikZ artifact rendering requires pdftoppm or qlmanage for PNG export.");
+  }
+
+  let largestBytes = 0;
+  for (const attempt of attempts) {
+    const renderDir = fs.mkdtempSync(path.join(tempDir, "render-"));
+    const pngPath = attempt.tool === "pdftoppm"
+      ? renderWithPdftoppm(pdftoppm, pdfPath, renderDir, attempt.value)
+      : renderWithQuickLook(qlmanage, pdfPath, renderDir, attempt.value);
+    const png = fs.readFileSync(pngPath);
+    largestBytes = Math.max(largestBytes, png.byteLength);
+    if (png.byteLength <= MAX_ARTIFACT_BYTES) {
+      return png;
+    }
+  }
+
+  throw new Error(
+    `TikZ PNG artifact is too large for Convex storage (${largestBytes} bytes; max ${MAX_ARTIFACT_BYTES})`
+  );
+}
+
+function renderWithPdftoppm(pdftoppm, pdfPath, renderDir, resolution) {
+  const prefix = path.join(renderDir, "artifact");
+  runCommandOrThrow(pdftoppm, [
+    "-png",
+    "-singlefile",
+    "-r",
+    String(resolution),
+    pdfPath,
+    prefix
+  ], renderDir);
+  const pngPath = `${prefix}.png`;
+  if (!fs.existsSync(pngPath)) {
+    throw new Error(`pdftoppm did not produce ${pngPath}`);
+  }
+  return pngPath;
+}
+
+function renderWithQuickLook(qlmanage, pdfPath, renderDir, size) {
+  runCommandOrThrow(qlmanage, ["-t", "-s", String(size), "-o", renderDir, pdfPath], renderDir);
+  const pngs = fs.readdirSync(renderDir)
+    .filter((file) => file.toLowerCase().endsWith(".png"))
+    .map((file) => path.join(renderDir, file));
+  if (pngs.length === 0) {
+    throw new Error("qlmanage did not produce a PNG preview");
+  }
+  return pngs.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0];
+}
+
+function artifactPngPath(sourcePath) {
+  return normalizeRelativePath(sourcePath).replace(/\.tex$/iu, ".png");
+}
+
+function bufferToArrayBuffer(buffer) {
+  return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
+}
+
 function collectPatch(workspacePath, session, baseRef = "HEAD") {
-  const entries = changedEntriesFromGit(workspacePath, baseRef).filter((entry) => shouldIncludePatchFile(entry.file));
+  const entries = changedEntriesFromGit(workspacePath, baseRef).filter((entry) => shouldIncludePatchFile(workspacePath, entry.file));
   const changedFiles = entries.map((entry) => entry.file);
   const rejectedFiles = changedFiles.filter((file) => !isEditable(file, session.editablePaths));
   const fullDiff = buildDiff(workspacePath, entries, baseRef);
@@ -1027,9 +1196,20 @@ function collectPatch(workspacePath, session, baseRef = "HEAD") {
   return { changedFiles, rejectedFiles, diff, diffStat, contentHash, rejectionReason };
 }
 
-function shouldIncludePatchFile(file) {
+function shouldIncludePatchFile(workspacePath, file) {
   if (RUNNER_METADATA_FILES.has(file)) return false;
+  if (isRenderedTexArtifact(workspacePath, file)) return false;
   return !isGeneratedArtifact(file);
+}
+
+function isRenderedTexArtifact(workspacePath, file) {
+  const normalized = normalizeRelativePath(file);
+  const lower = normalized.toLowerCase();
+  if (!lower.endsWith(".pdf") && !lower.endsWith(".png")) {
+    return false;
+  }
+  const texPath = normalized.replace(/\.(pdf|png)$/iu, ".tex");
+  return fs.existsSync(path.join(workspacePath, texPath));
 }
 
 function changedEntriesFromGit(workspacePath, baseRef) {
@@ -1111,6 +1291,56 @@ function gitOutput(args, cwd) {
     throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
   }
   return result.stdout;
+}
+
+function safeResolveWorkspacePath(workspacePath, relativePath) {
+  const workspaceRoot = path.resolve(workspacePath);
+  const absolutePath = path.resolve(workspaceRoot, normalizeRelativePath(relativePath));
+  if (absolutePath !== workspaceRoot && !absolutePath.startsWith(`${workspaceRoot}${path.sep}`)) {
+    throw new Error(`Path escapes workspace: ${relativePath}`);
+  }
+  return absolutePath;
+}
+
+function findExecutable(name, extraDirs = []) {
+  const pathEntries = [
+    ...extraDirs,
+    ...(process.env.PATH ?? "").split(path.delimiter)
+  ].filter(Boolean);
+  const extensions = process.platform === "win32" ? ["", ".cmd", ".exe"] : [""];
+  for (const directory of pathEntries) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${name}${extension}`);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return undefined;
+}
+
+function runCommandOrThrow(command, args, cwd) {
+  const result = spawnSync(command, args, {
+    cwd,
+    env: texProcessEnv(),
+    encoding: "utf8",
+    maxBuffer: 2_000_000
+  });
+  if (result.status !== 0) {
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.trim();
+    throw new Error(`${path.basename(command)} failed: ${output.slice(-3000)}`);
+  }
+  return result;
+}
+
+function texProcessEnv() {
+  return {
+    ...process.env,
+    PATH: [TEX_BIN_DIR, process.env.PATH].filter(Boolean).join(path.delimiter)
+  };
 }
 
 function isEditable(file, editablePatterns) {

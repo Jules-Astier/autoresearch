@@ -1,18 +1,55 @@
 # Session Directory Contract
 
-A session directory is the handoff between a project and Autoresearch. It can
-live anywhere on disk. The only required file is `session.json`.
+A session directory is the handoff between a target project and Autoresearch. It
+can live anywhere on disk and should be small enough to check into the target
+project or keep beside it. The only file the CLI requires today is
+`session.json`.
 
 ```text
 my-session/
-  session.json
-  goal.md
-  metric_contract.md
-  prompts/
+  session.json                  # required machine-readable contract
+  goal.md                       # recommended objective and scope
+  metric_contract.md            # recommended metric/output notes
+  prompts/                      # optional prompt source material
+    planner.md
+    reviewer.md
+    worker.md
+  context/                      # optional domain notes for humans/agents
+    domain.md
+    constraints.md
+  baselines/                    # optional evidence from known-good runs
+    baseline.metrics.json
+    baseline.log
+  references/                   # optional paper notes, diagrams, examples
+  .env.example                  # optional variable names, never secrets
 ```
 
-`goal.md`, `metric_contract.md`, and prompt files are optional for the runtime,
-but useful context for humans and for prompts referenced in `session.json`.
+Keep the target repository itself outside the session directory. `repoPath` in
+`session.json` points at that repository. Runner-created workspaces are separate
+disposable copies or git worktrees under the runner workspace root; they are not
+part of the session directory contract.
+
+`goal.md`, `metric_contract.md`, prompts, context notes, baselines, and
+references are optional for the current runtime. Treat them as stable source
+material for reviewers, prompt authors, and future tooling. Do not store secret
+values in any session file; use `agent.envVars`, `sandbox.envVars`, or a local
+environment instead.
+
+## Folder Roles
+
+- `session.json`: the single source of truth for registration and execution.
+- `goal.md`: concise objective, out-of-scope changes, and success criteria.
+- `metric_contract.md`: how the benchmark reports metrics, the objective
+  priority order, and what makes a run valid.
+- `prompts/`: reusable prompt fragments or full planner/reviewer/worker prompts.
+  The current CLI does not load these automatically.
+- `context/`: domain vocabulary, model assumptions, dataset constraints, or
+  architecture notes that should not live in `session.json`.
+- `baselines/`: optional benchmark logs or metric snapshots from the unmodified
+  target project. These are for comparison and audit, not runtime input.
+- `references/`: optional supporting materials such as paper notes, screenshots,
+  or diagrams.
+- `.env.example`: names of required environment variables only.
 
 ## `session.json`
 
@@ -25,25 +62,29 @@ but useful context for humans and for prompts referenced in `session.json`.
   "benchmarkCommand": "npm test -- --json",
   "targetExperimentCount": 20,
   "maxConcurrentRuns": 2,
-  "editablePaths": ["src/model.ts", "config/tunable.json"],
-  "immutablePaths": ["data/**", "config/fixed.json"],
+  "editablePaths": ["src/model.ts", "config/tunable.json", "figures/model_architecture.tex"],
+  "immutablePaths": ["data/**", "config/fixed.json", "figures/**/*.pdf", "figures/**/*.png"],
   "runtimeConfigPaths": ["config/tunable.json"],
-  "modelIoContract": "Keep the public CLI and metric JSON output stable.",
+  "modelIoContract": "Keep the public CLI and metric JSON output stable. For architecture_change experiments, update figures/model_architecture.tex using TikZ.",
   "agent": {
     "provider": "codex",
     "model": "gpt-5.4",
     "effort": "high"
   },
   "metricContract": {
-    "primaryMetric": "validation_loss",
-    "direction": "minimize",
+    "rankingMode": "lexicographic",
     "metrics": [
-      { "name": "validation_loss", "direction": "minimize" },
-      { "name": "accuracy", "direction": "maximize" }
+      { "name": "validation_loss", "direction": "minimize", "role": "objective" },
+      { "name": "accuracy", "direction": "maximize", "role": "objective" },
+      { "name": "latency_ms", "direction": "minimize", "role": "constraint", "max": 25 }
     ]
   }
 }
 ```
+
+For `rankingMode: "lexicographic"`, objective metrics are compared in list
+order. Constraint metrics are pass/fail gates and are not used as tie-breakers.
+Registration derives compatibility fields from the first objective metric.
 
 Paths in `repoPath` are resolved relative to the session directory at
 registration time and stored as absolute paths. `editablePaths`,
@@ -53,6 +94,32 @@ repository root.
 The benchmark command runs inside an isolated copy or git worktree of the target
 repository. The runner accepts metrics from the last JSON object printed by the
 benchmark or from lines shaped like `metric_name: 1.23`.
+
+## TikZ Architecture Artifacts
+
+When architecture changes should be visible as diagrams, add a standalone TikZ
+source file to `editablePaths`, usually under `figures/`. Keep rendered PDF and
+PNG outputs in `immutablePaths`; workers should edit only the `.tex` source.
+
+For accepted patches, the runner detects changed TikZ `.tex` sources, compiles a
+temporary PDF, converts it to PNG, and stores only the PNG bytes in
+`researchArtifacts`. The PDF is not persisted.
+
+Architecture experiments are required to update a TikZ source when the session
+has an editable diagram path. Use the repo-local skill at
+`.agents/skills/model-diagram-tikz/SKILL.md` for diagram style and validation.
+
+Check the local toolchain with:
+
+```bash
+autoresearch doctor
+```
+
+On macOS, install BasicTeX and the required packages with:
+
+```bash
+autoresearch install-tex --macos
+```
 
 ## Agent Provider
 

@@ -1,4 +1,11 @@
-import { formatMetricValue, formatDelta, isImprovement, metricDirection, statusGlyph } from "./format";
+import {
+  formatMetricValue,
+  formatDelta,
+  isImprovement,
+  metricDirection,
+  statusGlyph,
+  topObjectiveMetric,
+} from "./format";
 
 type Props = {
   experiments: any[];
@@ -17,19 +24,19 @@ export function Ledger({
   metricContract,
   bestMetrics,
 }: Props) {
-  const primary = String(metricContract?.primaryMetric ?? "");
-  const direction = metricDirection(metricContract, primary);
+  const topObjective = topObjectiveMetric(metricContract);
+  const direction = metricDirection(metricContract, topObjective);
   const sorted = [...experiments].sort((a, b) => b.ordinal - a.ordinal); // newest first
 
-  // running-best lookup so we can show delta vs prior best at each row
+  // running-best lookup so we can show delta vs prior top-objective best
   const byOrdinal = [...experiments]
     .sort((a, b) => a.ordinal - b.ordinal)
-    .filter((e) => typeof e.metrics?.[primary] === "number");
+    .filter((e) => typeof e.metrics?.[topObjective] === "number");
   const bestUntil = new Map<number, number | undefined>();
   let runningBest: number | undefined;
   for (const e of byOrdinal) {
     bestUntil.set(e.ordinal, runningBest);
-    const v = e.metrics[primary] as number;
+    const v = e.metrics[topObjective] as number;
     runningBest =
       runningBest === undefined
         ? v
@@ -48,13 +55,16 @@ export function Ledger({
         const isDead = rolledBackIds.has(e._id);
         const isSelected = e._id === selectedExperimentId;
         const status = String(e.status ?? "");
-        const primaryValue = typeof e.metrics?.[primary] === "number" ? (e.metrics[primary] as number) : undefined;
+        const objectiveValue =
+          typeof e.metrics?.[topObjective] === "number"
+            ? (e.metrics[topObjective] as number)
+            : undefined;
         const priorBest = bestUntil.get(e.ordinal);
         const delta =
-          primaryValue !== undefined && priorBest !== undefined
-            ? primaryValue - priorBest
+          objectiveValue !== undefined && priorBest !== undefined
+            ? objectiveValue - priorBest
             : undefined;
-        const deltaShown = delta !== undefined && primaryValue !== undefined;
+        const deltaShown = delta !== undefined && objectiveValue !== undefined;
         const deltaSign = direction === "minimize" && delta !== undefined ? -delta : delta ?? 0;
 
         return (
@@ -82,9 +92,9 @@ export function Ledger({
                     {e.promoted && !isDead ? " · promoted" : ""}
                   </span>
                 </span>
-                {primary && primaryValue !== undefined ? (
+                {topObjective && objectiveValue !== undefined ? (
                   <span className="ledger-metrics ledger-metric">
-                    {primary} <strong>{formatMetricValue(primaryValue)}</strong>
+                    {topObjective} <strong>{formatMetricValue(objectiveValue)}</strong>
                     {deltaShown ? (
                       <span
                         className={`delta ${

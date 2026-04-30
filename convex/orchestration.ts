@@ -143,6 +143,7 @@ export const createResearchSession = mutation({
   args: createSessionArgs,
   handler: async (ctx, args) => {
     const now = nowUtc();
+    const metricContract = normalizeMetricContract(args.metricContract);
     const existing = await ctx.db
       .query("researchSessions")
       .withIndex("by_slug", (q) => q.eq("slug", args.slug))
@@ -171,7 +172,7 @@ export const createResearchSession = mutation({
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
       modelIoContract: args.modelIoContract,
       agent: args.agent,
-      metricContract: args.metricContract,
+      metricContract,
       sandbox: args.sandbox,
       earlyStopping: args.earlyStopping,
       createdAtUtc: now,
@@ -191,6 +192,7 @@ export const registerResearchSession = mutation({
   args: createSessionArgs,
   handler: async (ctx, args) => {
     const now = nowUtc();
+    const metricContract = normalizeMetricContract(args.metricContract);
     const existing = await ctx.db
       .query("researchSessions")
       .withIndex("by_slug", (q) => q.eq("slug", args.slug))
@@ -217,7 +219,7 @@ export const registerResearchSession = mutation({
         runtimeConfigPaths: args.runtimeConfigPaths ?? [],
         modelIoContract: args.modelIoContract,
         agent: args.agent,
-        metricContract: args.metricContract,
+        metricContract,
         sandbox: args.sandbox,
         earlyStopping: args.earlyStopping,
         createdAtUtc: now,
@@ -245,7 +247,7 @@ export const registerResearchSession = mutation({
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
       modelIoContract: args.modelIoContract,
       agent: args.agent,
-      metricContract: args.metricContract,
+      metricContract,
       sandbox: args.sandbox,
       earlyStopping: args.earlyStopping,
       updatedAtUtc: now,
@@ -293,7 +295,7 @@ export const updateResearchSessionContract = mutation({
     if (args.agent !== undefined)
       patch.agent = args.agent;
     if (args.metricContract !== undefined)
-      patch.metricContract = args.metricContract;
+      patch.metricContract = normalizeMetricContract(args.metricContract);
     if (args.sandbox !== undefined)
       patch.sandbox = args.sandbox;
     if (args.earlyStopping !== undefined)
@@ -1307,9 +1309,8 @@ export const seedControlPlaneDemo = mutation({
       runtimeConfigPaths: ["configs/train.yaml", "configs/model.yaml"],
       modelIoContract:
         "Keep dataloader batch inputs unchanged and return the same prediction/loss output keys.",
-      metricContract: {
-        primaryMetric: "validation_loss",
-        rankingMode: "constraints_then_primary",
+      metricContract: normalizeMetricContract({
+        rankingMode: "lexicographic",
         metrics: [
           {
             name: "validation_loss",
@@ -1330,7 +1331,7 @@ export const seedControlPlaneDemo = mutation({
             max: 25,
           },
         ],
-      },
+      }),
       createdAtUtc: now,
       updatedAtUtc: now,
     });
@@ -1714,10 +1715,8 @@ async function insertEvent(
 
 function scoreMetrics(contract: any, metrics: Record<string, number>): number {
   const rankingMode = String(contract?.rankingMode ?? "single_primary");
-  const metricSpecs = Array.isArray(contract?.metrics) ? contract.metrics : [];
-  const primaryMetric = String(
-    contract?.primaryMetric ?? metricSpecs[0]?.name ?? "objective",
-  );
+  const metricSpecs = objectiveMetricSpecs(contract);
+  const primaryMetric = topObjectiveMetric(contract);
 
   if (rankingMode === "lexicographic") {
     return metricSpecs.reduce((total: number, spec: any, index: number) => {
@@ -1827,7 +1826,7 @@ function lexicographicMetricsImprove(
   if (!current) {
     return true;
   }
-  const specs = Array.isArray(contract?.metrics) ? contract.metrics : [];
+  const specs = objectiveMetricSpecs(contract);
   for (const spec of specs) {
     const name = String(spec.name);
     const candidateValue = candidate[name];
@@ -1847,6 +1846,128 @@ function lexicographicMetricsImprove(
     return direction === "maximize" ? delta > 0 : delta < 0;
   }
   return false;
+}
+
+function normalizeMetricContract(contract: any): any {
+  if (!contract || typeof contract !== "object" || Array.isArray(contract)) {
+    throw new Error("metricContract must be an object");
+  }
+  const topLevelDirection = optionalMetricDirection(
+    contract.direction,
+    "metricContract.direction",
+  );
+  const metrics = Array.isArray(contract.metrics)
+    ? contract.metrics.map((spec: any, index: number) =>
+        normalizeMetricSpec(spec, index, topLevelDirection)
+      )
+    : [];
+  const topObjective = metrics.find((spec: any) => isObjectiveMetricSpec(spec));
+  const explicitPrimaryMetric = optionalString(contract.primaryMetric);
+  const rankingMode =
+    contract.rankingMode ?? (explicitPrimaryMetric ? undefined : "lexicographic");
+  const primaryMetric =
+    rankingMode === "lexicographic"
+      ? topObjective?.name ?? explicitPrimaryMetric
+      : explicitPrimaryMetric ?? topObjective?.name;
+  if (!primaryMetric) {
+    throw new Error(
+      "metricContract must include primaryMetric or at least one objective metric",
+    );
+  }
+  const primarySpec = metrics.find((spec: any) => spec.name === primaryMetric);
+  const direction = topLevelDirection ?? primarySpec?.direction ?? topObjective?.direction;
+  if (!direction) {
+    throw new Error(
+      "metricContract.direction or the top objective direction must be minimize or maximize",
+    );
+  }
+  return {
+    ...contract,
+    primaryMetric,
+    direction,
+    ...(rankingMode === undefined ? {} : { rankingMode }),
+    metrics: metrics.length > 0 ? metrics : [{ name: primaryMetric, direction }],
+  };
+}
+
+function normalizeMetricSpec(
+  spec: any,
+  index: number,
+  fallbackDirection: "maximize" | "minimize" | undefined,
+) {
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+    throw new Error(`metricContract.metrics[${index}] must be an object`);
+  }
+  const name = requiredString(spec.name, `metricContract.metrics[${index}].name`);
+  const direction =
+    optionalMetricDirection(
+      spec.direction,
+      `metricContract.metrics[${index}].direction`,
+    ) ??
+    fallbackDirection ??
+    "minimize";
+  return { ...spec, name, direction };
+}
+
+function optionalMetricDirection(
+  value: unknown,
+  field: string,
+): "maximize" | "minimize" | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const direction = String(value).trim().toLowerCase();
+  if (direction !== "minimize" && direction !== "maximize") {
+    throw new Error(`${field} must be minimize or maximize`);
+  }
+  return direction;
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${field} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function optionalString(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error("optional string field must be a string");
+  }
+  return value.trim();
+}
+
+function objectiveMetricSpecs(contract: any): any[] {
+  const specs = Array.isArray(contract?.metrics) ? contract.metrics : [];
+  const objectives = specs.filter((spec: any) => isObjectiveMetricSpec(spec));
+  if (objectives.length > 0) {
+    return objectives;
+  }
+  const primaryMetric =
+    typeof contract?.primaryMetric === "string" && contract.primaryMetric.trim()
+      ? contract.primaryMetric.trim()
+      : undefined;
+  if (!primaryMetric) {
+    return [];
+  }
+  return [{ name: primaryMetric, direction: contract?.direction ?? "minimize" }];
+}
+
+function topObjectiveMetric(contract: any): string {
+  const objectiveName = objectiveMetricSpecs(contract)[0]?.name;
+  if (String(contract?.rankingMode ?? "") === "lexicographic") {
+    return String(objectiveName ?? contract?.primaryMetric ?? "objective");
+  }
+  return String(
+    contract?.primaryMetric ?? objectiveName ?? "objective",
+  );
+}
+
+function isObjectiveMetricSpec(spec: any): boolean {
+  return String(spec?.role ?? "objective") !== "constraint";
 }
 
 function constraintsPass(

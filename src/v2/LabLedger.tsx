@@ -12,6 +12,7 @@ import { AgentDialogue } from "./AgentDialogue";
 import { NodeDetail } from "./NodeDetail";
 import { DiffSheet } from "./DiffSheet";
 import { Toolbar } from "./Toolbar";
+import { NewSessionDialog, type NewSessionPayload } from "./NewSessionDialog";
 import { buildLineage, type ExperimentLite, type RollbackLite } from "./lineageTree";
 import "./lab.css";
 
@@ -27,10 +28,12 @@ export function LabLedger() {
   const setSessionConcurrency = useMutation(api.orchestration.setSessionConcurrency);
   const setWorkerControl = useMutation(api.orchestration.setWorkerControl);
   const seedDemo = useMutation(api.orchestration.seedControlPlaneDemo);
+  const createSession = useMutation(api.orchestration.createResearchSession);
 
   const [selectedSessionId, setSelectedSessionId] = useState<string>();
   const [selectedExperimentId, setSelectedExperimentId] = useState<string | undefined>();
   const [diffPatchId, setDiffPatchId] = useState<string | undefined>();
+  const [isNewSessionOpen, setIsNewSessionOpen] = useState(false);
 
   useEffect(() => {
     if (!selectedSessionId && sessions && sessions.length > 0) {
@@ -48,6 +51,7 @@ export function LabLedger() {
   const rollbacks: RollbackLite[] = (detail?.rollbacks ?? []) as RollbackLite[];
   const runs = detail?.runs ?? [];
   const patches = detail?.patches ?? [];
+  const artifacts = detail?.artifacts ?? [];
   const messages = detail?.messages ?? [];
   const activeLogs = detail?.activeLogs ?? [];
   const activeRun = detail?.activeRun ?? null;
@@ -83,7 +87,11 @@ export function LabLedger() {
   return (
     <div className="lab-ledger">
       <div className="page">
-        <Header isLive={isLive} lastUpdate={lastUpdate} />
+        <Header
+          isLive={isLive}
+          lastUpdate={lastUpdate}
+          onNewSession={() => setIsNewSessionOpen(true)}
+        />
 
         <SessionTape
           sessions={sessions ?? []}
@@ -96,7 +104,11 @@ export function LabLedger() {
         />
 
         {!session ? (
-          <EmptyShell sessions={sessions} onSeed={() => void seedDemo()} />
+          <EmptyShell
+            sessions={sessions}
+            onSeed={() => void seedDemo()}
+            onNewSession={() => setIsNewSessionOpen(true)}
+          />
         ) : (
           <div className="canvas">
             <main>
@@ -178,6 +190,7 @@ export function LabLedger() {
           experiment={selectedExperiment}
           runs={runs}
           patches={patches}
+          artifacts={artifacts}
           bestMetrics={session?.bestMetrics}
           metricContract={session?.metricContract}
           isRolledBack={rolledBackIds.has(selectedExperiment._id)}
@@ -198,6 +211,18 @@ export function LabLedger() {
       {selectedPatch ? (
         <DiffSheet patch={selectedPatch} onClose={() => setDiffPatchId(undefined)} />
       ) : null}
+
+      {isNewSessionOpen ? (
+        <NewSessionDialog
+          onClose={() => setIsNewSessionOpen(false)}
+          onCreate={async (payload: NewSessionPayload) => {
+            const sessionId = await createSession(payload as any);
+            setSelectedSessionId(String(sessionId));
+            setSelectedExperimentId(undefined);
+            setDiffPatchId(undefined);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -205,9 +230,11 @@ export function LabLedger() {
 function EmptyShell({
   sessions,
   onSeed,
+  onNewSession,
 }: {
   sessions: any[] | undefined;
   onSeed: () => void;
+  onNewSession: () => void;
 }) {
   return (
     <div
@@ -225,9 +252,14 @@ function EmptyShell({
       <p style={{ color: "var(--ink-3)", fontSize: 14, marginBottom: 18 }}>
         seed the demo to see the ledger come alive.
       </p>
-      <button type="button" className="btn btn-primary" onClick={onSeed}>
-        seed demo session
-      </button>
+      <div className="empty-actions">
+        <button type="button" className="btn btn-primary" onClick={onNewSession}>
+          new session
+        </button>
+        <button type="button" className="btn btn-quiet" onClick={onSeed}>
+          seed demo session
+        </button>
+      </div>
     </div>
   );
 }

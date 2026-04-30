@@ -25,11 +25,10 @@
     "envVars": ["OPENAI_API_KEY"]
   },
   "metricContract": {
-    "primaryMetric": "validation_loss",
-    "direction": "minimize",
+    "rankingMode": "lexicographic",
     "metrics": [
-      { "name": "validation_loss", "direction": "minimize" },
-      { "name": "accuracy", "direction": "maximize" }
+      { "name": "validation_loss", "direction": "minimize", "role": "objective" },
+      { "name": "accuracy", "direction": "maximize", "role": "objective" }
     ]
   },
   "sandbox": {

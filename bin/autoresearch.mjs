@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,6 +20,14 @@ async function main() {
   }
   if (command === "register") {
     await registerSession(argv);
+    return;
+  }
+  if (command === "doctor") {
+    runDoctor();
+    return;
+  }
+  if (command === "install-tex") {
+    await installTex(argv);
     return;
   }
   if (command === "runner") {
@@ -90,19 +98,70 @@ function normalizeMetricContract(contract) {
   if (!contract || typeof contract !== "object" || Array.isArray(contract)) {
     throw new Error("metricContract must be an object");
   }
-  const primaryMetric = requiredString(contract.primaryMetric, "metricContract.primaryMetric");
-  const direction = String(contract.direction ?? "").trim().toLowerCase();
-  if (direction !== "minimize" && direction !== "maximize") {
-    throw new Error("metricContract.direction must be minimize or maximize");
+  const topLevelDirection = optionalMetricDirection(
+    contract.direction,
+    "metricContract.direction"
+  );
+  const metrics = Array.isArray(contract.metrics)
+    ? contract.metrics.map((spec, index) =>
+        normalizeMetricSpec(spec, index, topLevelDirection)
+      )
+    : [];
+  const topObjective = metrics.find((spec) => isObjectiveMetricSpec(spec));
+  const explicitPrimaryMetric = optionalString(contract.primaryMetric);
+  const rankingMode =
+    contract.rankingMode ?? (explicitPrimaryMetric ? undefined : "lexicographic");
+  const primaryMetric =
+    rankingMode === "lexicographic"
+      ? topObjective?.name ?? explicitPrimaryMetric
+      : explicitPrimaryMetric ?? topObjective?.name;
+  if (!primaryMetric) {
+    throw new Error(
+      "metricContract must include primaryMetric or at least one objective metric"
+    );
+  }
+  const primarySpec = metrics.find((spec) => spec.name === primaryMetric);
+  const direction = topLevelDirection ?? primarySpec?.direction ?? topObjective?.direction;
+  if (!direction) {
+    throw new Error(
+      "metricContract.direction or the top objective direction must be minimize or maximize"
+    );
   }
   return {
     ...contract,
     primaryMetric,
     direction,
-    metrics: Array.isArray(contract.metrics) && contract.metrics.length > 0
-      ? contract.metrics
-      : [{ name: primaryMetric, direction }]
+    ...(rankingMode === undefined ? {} : { rankingMode }),
+    metrics: metrics.length > 0 ? metrics : [{ name: primaryMetric, direction }]
   };
+}
+
+function normalizeMetricSpec(spec, index, fallbackDirection) {
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) {
+    throw new Error(`metricContract.metrics[${index}] must be an object`);
+  }
+  const name = requiredString(spec.name, `metricContract.metrics[${index}].name`);
+  const direction =
+    optionalMetricDirection(
+      spec.direction,
+      `metricContract.metrics[${index}].direction`
+    ) ??
+    fallbackDirection ??
+    "minimize";
+  return { ...spec, name, direction };
+}
+
+function optionalMetricDirection(value, field) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const direction = String(value).trim().toLowerCase();
+  if (direction !== "minimize" && direction !== "maximize") {
+    throw new Error(`${field} must be minimize or maximize`);
+  }
+  return direction;
+}
+
+function isObjectiveMetricSpec(spec) {
+  return String(spec.role ?? "objective") !== "constraint";
 }
 
 function normalizeSandboxConfig(value) {
@@ -195,6 +254,126 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function runDoctor() {
+  const checks = [
+    {
+      label: "pdflatex",
+      ok: Boolean(findExecutable("pdflatex", ["/Library/TeX/texbin"])),
+      hint: "required to compile standalone TikZ sources"
+    },
+    {
+      label: "latexmk",
+      ok: Boolean(findExecutable("latexmk", ["/Library/TeX/texbin"])),
+      hint: "recommended for robust LaTeX compilation"
+    },
+    {
+      label: "TikZ/PGF",
+      ok: kpsewhich("tikz.sty"),
+      hint: "install TeX Live package pgf"
+    },
+    {
+      label: "standalone.cls",
+      ok: kpsewhich("standalone.cls"),
+      hint: "install TeX Live package standalone"
+    },
+    {
+      label: "PNG exporter",
+      ok: Boolean(findExecutable("pdftoppm") || findExecutable("qlmanage")),
+      hint: "install poppler for pdftoppm or use macOS qlmanage"
+    }
+  ];
+
+  console.log("Autoresearch doctor");
+  let failed = false;
+  for (const check of checks) {
+    console.log(`  ${check.ok ? "ok " : "err"} ${check.label}${check.ok ? "" : ` - ${check.hint}`}`);
+    failed ||= !check.ok;
+  }
+  if (failed) {
+    console.log("");
+    console.log("Run `autoresearch install-tex --macos` on macOS, or install TeX Live packages manually.");
+    process.exitCode = 1;
+  }
+}
+
+async function installTex(argv) {
+  const args = parseArgs(argv);
+  if (args.help || args.h) {
+    console.log("Usage: autoresearch install-tex --macos");
+    return;
+  }
+  if (process.platform !== "darwin") {
+    throw new Error("install-tex currently supports macOS only. Install TeX Live manually on this platform.");
+  }
+  if (!args.macos) {
+    throw new Error("Usage: autoresearch install-tex --macos");
+  }
+  if (!findExecutable("brew")) {
+    throw new Error("Homebrew is required for `autoresearch install-tex --macos`.");
+  }
+
+  if (!brewPackageInstalled(["list", "--cask", "basictex"])) {
+    await runCommand("brew", ["install", "--cask", "basictex"]);
+  } else {
+    console.log("[tex] basictex already installed");
+  }
+  if (!brewPackageInstalled(["list", "poppler"])) {
+    await runCommand("brew", ["install", "poppler"]);
+  } else {
+    console.log("[tex] poppler already installed");
+  }
+
+  const tlmgr = findExecutable("tlmgr", ["/Library/TeX/texbin"]);
+  if (!tlmgr) {
+    throw new Error("tlmgr was not found after BasicTeX install. Restart the shell or add /Library/TeX/texbin to PATH.");
+  }
+  await runCommand("sudo", [tlmgr, "option", "repository", "https://mirror.ctan.org/systems/texlive/tlnet"]);
+  await runCommand("sudo", [tlmgr, "update", "--self"]);
+  await runCommand("sudo", [tlmgr, "install", "pgf", "standalone", "latexmk", "lm", "microtype"]);
+  runDoctor();
+}
+
+function kpsewhich(fileName) {
+  const kpsewhichBin = findExecutable("kpsewhich", ["/Library/TeX/texbin"]);
+  if (!kpsewhichBin) return false;
+  const result = spawnSync(kpsewhichBin, [fileName], {
+    env: texProcessEnv(),
+    stdio: "ignore"
+  });
+  return result.status === 0;
+}
+
+function findExecutable(name, extraDirs = []) {
+  const pathEntries = [
+    ...extraDirs,
+    ...(process.env.PATH ?? "").split(path.delimiter)
+  ].filter(Boolean);
+  const extensions = process.platform === "win32" ? ["", ".cmd", ".exe"] : [""];
+  for (const directory of pathEntries) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${name}${extension}`);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return undefined;
+}
+
+function brewPackageInstalled(args) {
+  return spawnSync("brew", args, { stdio: "ignore" }).status === 0;
+}
+
+function texProcessEnv() {
+  return {
+    ...process.env,
+    PATH: ["/Library/TeX/texbin", process.env.PATH].filter(Boolean).join(path.delimiter)
+  };
+}
+
 async function runScript(script, argv) {
   await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(ROOT, "scripts", script), ...argv], {
@@ -206,6 +385,21 @@ async function runScript(script, argv) {
     child.once("exit", (code) => {
       if (code === 0) resolve();
       else reject(new Error(`${script} exited with ${code}`));
+    });
+  });
+}
+
+async function runCommand(command, argv) {
+  await new Promise((resolve, reject) => {
+    const child = spawn(command, argv, {
+      cwd: ROOT,
+      env: texProcessEnv(),
+      stdio: "inherit"
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} ${argv.join(" ")} exited with ${code}`));
     });
   });
 }
@@ -247,6 +441,8 @@ function printHelp() {
   console.log(`Usage:
   autoresearch dev
   autoresearch register <session-dir> [--convex-url URL] [--dry-run]
+  autoresearch doctor
+  autoresearch install-tex --macos
   autoresearch runner [runner options]
   autoresearch orchestrator [orchestrator options]`);
 }

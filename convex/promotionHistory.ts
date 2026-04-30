@@ -60,10 +60,8 @@ function scoreMetrics(
   metrics: Record<string, number>,
 ): number {
   const rankingMode = String(contract?.rankingMode ?? "single_primary");
-  const metricSpecs = Array.isArray(contract?.metrics) ? contract.metrics : [];
-  const primaryMetric = String(
-    contract?.primaryMetric ?? metricSpecs[0]?.name ?? "objective",
-  );
+  const metricSpecs = objectiveMetricSpecs(contract);
+  const primaryMetric = topObjectiveMetric(contract);
 
   if (rankingMode === "lexicographic") {
     return metricSpecs.reduce((total: number, spec: any, index: number) => {
@@ -109,7 +107,7 @@ function lexicographicMetricsImprove(
   if (!current) {
     return true;
   }
-  const specs = Array.isArray(contract?.metrics) ? contract.metrics : [];
+  const specs = objectiveMetricSpecs(contract);
   for (const spec of specs) {
     const name = String(spec.name);
     const candidateValue = candidate[name];
@@ -129,6 +127,36 @@ function lexicographicMetricsImprove(
     return direction === "maximize" ? delta > 0 : delta < 0;
   }
   return false;
+}
+
+function objectiveMetricSpecs(contract: MetricContractLike): any[] {
+  const specs = Array.isArray(contract?.metrics) ? contract.metrics : [];
+  const objectives = specs.filter((spec: any) => isObjectiveMetricSpec(spec));
+  if (objectives.length > 0) {
+    return objectives;
+  }
+  const primaryMetric =
+    typeof contract?.primaryMetric === "string" && contract.primaryMetric.trim()
+      ? contract.primaryMetric.trim()
+      : undefined;
+  if (!primaryMetric) {
+    return [];
+  }
+  return [{ name: primaryMetric, direction: "minimize" }];
+}
+
+function topObjectiveMetric(contract: MetricContractLike): string {
+  const objectiveName = objectiveMetricSpecs(contract)[0]?.name;
+  if (String(contract?.rankingMode ?? "") === "lexicographic") {
+    return String(objectiveName ?? contract?.primaryMetric ?? "objective");
+  }
+  return String(
+    contract?.primaryMetric ?? objectiveName ?? "objective",
+  );
+}
+
+function isObjectiveMetricSpec(spec: any): boolean {
+  return String(spec?.role ?? "objective") !== "constraint";
 }
 
 function constraintsPass(

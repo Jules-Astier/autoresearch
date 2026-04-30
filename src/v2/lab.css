@@ -2,7 +2,7 @@
    Lab Ledger — design tokens
    A working researcher's notebook crossed with a market terminal.
    Warm paper, ink charcoal, moss for accepted, oxblood for rejected,
-   amber phosphor for the primary metric, sepia for archived branches.
+   amber phosphor for the top objective, sepia for archived branches.
    ──────────────────────────────────────────────────────────── */
 
 .lab-ledger {
@@ -37,7 +37,7 @@
   --moss-faded: #b9c8a0;
   --oxblood: #8a3a2e;        /* rejected / regression */
   --oxblood-soft: #ebd6d1;
-  --amber: #b07215;          /* primary metric, the phosphor */
+  --amber: #b07215;          /* top objective, the phosphor */
   --amber-soft: #f1e3c2;
   --amber-glow: rgba(176, 114, 21, 0.18);
   --sepia: #8a7a5a;          /* rolled back, archived */
@@ -117,6 +117,9 @@ body.lab-frontier-scroll-locked {
   font-family: var(--face-mono);
   font-size: 12px;
   color: var(--ink-3);
+}
+.lab-ledger .header-meta .btn {
+  font-family: var(--face-sans);
 }
 .lab-ledger .heartbeat {
   display: inline-flex;
@@ -943,6 +946,76 @@ body.lab-frontier-scroll-locked {
   padding: 0;
 }
 
+/* ── new session intake ────────────────────────────────────── */
+.lab-ledger .new-session-modal {
+  max-width: 920px;
+}
+.lab-ledger .new-session-body {
+  padding: 22px;
+}
+.lab-ledger .new-session-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.lab-ledger .new-session-wide {
+  grid-column: 1 / -1;
+}
+.lab-ledger .path-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.lab-ledger .path-input {
+  flex: 1;
+  min-width: 0;
+}
+.lab-ledger .form-error {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-left: 2px solid var(--oxblood);
+  background: var(--oxblood-soft);
+  color: var(--oxblood);
+  border-radius: var(--r-sm);
+  font-family: var(--face-mono);
+  font-size: 12px;
+}
+.lab-ledger .icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  justify-content: center;
+}
+.lab-ledger .spin {
+  animation: lab-spin 850ms linear infinite;
+}
+@keyframes lab-spin {
+  to { transform: rotate(360deg); }
+}
+.lab-ledger .empty-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+@media (max-width: 760px) {
+  .lab-ledger .page {
+    padding: 20px 16px 48px;
+  }
+  .lab-ledger .header,
+  .lab-ledger .header-meta,
+  .lab-ledger .path-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .lab-ledger .new-session-grid {
+    grid-template-columns: 1fr;
+  }
+  .lab-ledger .modal-backdrop {
+    padding: 14px;
+  }
+}
+
 /* diff display — editorial corrections */
 .lab-ledger .diff {
   font-family: var(--face-mono);
@@ -1015,6 +1088,13 @@ body.lab-frontier-scroll-locked {
 .lab-ledger .select:focus {
   border-color: var(--amber);
   box-shadow: 0 0 0 3px var(--amber-glow);
+}
+.lab-ledger textarea.input {
+  min-height: 72px;
+  height: auto;
+  padding: 9px 10px;
+  line-height: 1.45;
+  resize: vertical;
 }
 
 /* ── tiny helpers ──────────────────────────────────────────── */
@@ -1129,4 +1209,42 @@ body.lab-frontier-scroll-locked {
   border: 1.5px dashed var(--sepia);
   width: 9px;
   height: 9px;
+}
+
+/* ── research artifacts ────────────────────────────────────── */
+.lab-ledger .artifact-list {
+  display: grid;
+  gap: 12px;
+}
+.lab-ledger .artifact-figure {
+  margin: 0;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  overflow: hidden;
+  background: var(--paper-2);
+}
+.lab-ledger .artifact-image {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  background: #fff;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.lab-ledger .artifact-figure figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.lab-ledger .artifact-figure figcaption svg {
+  flex: 0 0 auto;
+  color: var(--sepia);
+}
+.lab-ledger .artifact-figure figcaption .mono {
+  margin-left: auto;
+  white-space: nowrap;
 }

@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Maximize2, Minus, Plus } from "lucide-react";
-import { formatMetricValue, formatDelta, formatRelativeShort, isImprovement, metricDirection } from "./format";
+import {
+  formatMetricValue,
+  formatDelta,
+  formatRelativeShort,
+  isImprovement,
+  metricDirection,
+  topObjectiveMetric,
+} from "./format";
 import type { ExperimentLite } from "./lineageTree";
 
 type Props = {
@@ -28,17 +35,17 @@ const CHART_PAD_TOP = 18;
 const CHART_PAD_BOTTOM = 28;
 
 export function Frontier({ session, experiments, onSelectExperiment }: Props) {
-  const primaryMetric = String(session?.metricContract?.primaryMetric ?? "");
-  const direction = metricDirection(session?.metricContract, primaryMetric);
+  const topObjective = topObjectiveMetric(session?.metricContract);
+  const direction = metricDirection(session?.metricContract, topObjective);
 
   const trajectory: Point[] = useMemo(() => {
     const completed = experiments
-      .filter((e) => typeof e.metrics?.[primaryMetric] === "number")
+      .filter((e) => typeof e.metrics?.[topObjective] === "number")
       .sort((a, b) => a.ordinal - b.ordinal);
 
     let best: number | undefined;
     return completed.map((e) => {
-      const v = e.metrics![primaryMetric] as number;
+      const v = e.metrics![topObjective] as number;
       const beats =
         best === undefined ||
         (direction === "maximize" ? v > best : v < best);
@@ -52,7 +59,7 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
         experimentId: e._id,
       };
     });
-  }, [experiments, primaryMetric, direction]);
+  }, [experiments, topObjective, direction]);
 
   const highWaterPoints = trajectory.filter((p) => p.isHighWater);
   const bestPoint = highWaterPoints[highWaterPoints.length - 1];
@@ -65,13 +72,13 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
       ? bestPoint.runningBest - previousBestPoint.runningBest
       : undefined;
 
-  const empty = trajectory.length === 0 || !primaryMetric;
+  const empty = trajectory.length === 0 || !topObjective;
 
   return (
-    <section className="frontier" aria-label="Frontier — primary metric trajectory">
+    <section className="frontier" aria-label="Frontier - top objective trajectory">
       <div className="frontier-head">
         <span className="frontier-metric-name">
-          {primaryMetric || "no primary metric"}
+          {topObjective || "no objective"}
         </span>
         <span className="frontier-direction">{direction}</span>
       </div>
@@ -301,7 +308,7 @@ function Chart({
   }
 
   return (
-    <div className="frontier-chart" ref={chartRef} aria-label="primary metric chart">
+    <div className="frontier-chart" ref={chartRef} aria-label="top objective chart">
       <div className="frontier-chart-yaxis">
         <svg width={56} height={CHART_H}>
           {yTicks.map((tickValue, i) => (
