@@ -4,6 +4,7 @@ import { Play, Pause, Plus, Minus, Square } from "lucide-react";
 type Props = {
   session: any;
   workerControl: any | undefined;
+  activePlanningCycle?: any;
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
@@ -15,6 +16,7 @@ type Props = {
 export function Toolbar({
   session,
   workerControl,
+  activePlanningCycle,
   onPause,
   onResume,
   onStop,
@@ -25,7 +27,7 @@ export function Toolbar({
   const [requestCount, setRequestCount] = useState("5");
   const [runners, setRunners] = useState(workerControl?.desiredRunnerCount ?? 1);
   const [plannerCount, setPlannerCount] = useState(
-    workerControl?.desiredPlannerCount ?? 3,
+    session?.maxPlannedConcurrentExperiments ?? workerControl?.desiredPlannerCount ?? 3,
   );
 
   useEffect(() => {
@@ -33,11 +35,21 @@ export function Toolbar({
   }, [workerControl?.desiredRunnerCount]);
 
   useEffect(() => {
-    setPlannerCount(workerControl?.desiredPlannerCount ?? 3);
-  }, [workerControl?.desiredPlannerCount]);
+    setPlannerCount(
+      session?.maxPlannedConcurrentExperiments ?? workerControl?.desiredPlannerCount ?? 3,
+    );
+  }, [session?.maxPlannedConcurrentExperiments, workerControl?.desiredPlannerCount]);
 
   const status = String(session?.status ?? "");
   const isPausable = status !== "paused" && status !== "stopped" && status !== "completed";
+  const progressParts = [
+    `${session?.completedExperimentCount ?? 0}/${session?.targetExperimentCount ?? 0} done`,
+    `${session?.activeRunCount ?? 0} active`,
+    activePlanningCycle
+      ? `planning ${activePlanningCycle.requestedCount ?? ""}`.trim()
+      : "",
+    `${session?.rollbackCount ?? 0} rollbacks`,
+  ].filter(Boolean);
 
   function commitRunners(next: number) {
     const clamped = Math.max(0, Math.min(64, Math.trunc(next)));
@@ -142,8 +154,7 @@ export function Toolbar({
       <div className="group">
         <span className="group-label">progress</span>
         <span className="mono" style={{ fontSize: 13, color: "var(--ink-2)" }}>
-          {session?.completedExperimentCount ?? 0}/{session?.targetExperimentCount ?? 0} done ·{" "}
-          {session?.activeRunCount ?? 0} active · {session?.rollbackCount ?? 0} rollbacks
+          {progressParts.join(" · ")}
         </span>
       </div>
     </div>

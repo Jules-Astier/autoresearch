@@ -5,14 +5,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeCode, codex as sandcastleCodex, opencode, pi, run as runSandcastle } from "@ai-hero/sandcastle";
+import { run as runSandcastle } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
+import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api.js";
+import {
+  createAgentProvider,
+  resolveAgentEnv,
+  resolveAgentRoleConfig
+} from "./agent-providers.mjs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const DEFAULT_WORKSPACE_ROOT = path.resolve(ROOT, "..", ".runtime", "codex-runner");
+const DEFAULT_WORKSPACE_ROOT = path.join(os.homedir(), ".autoresearch", "runner");
+const DEFAULT_COMPUTE_BUDGET_SECONDS = 300;
 const RUNNER_METADATA_FILES = new Set([
   "AUTORESEARCH_PROMPT.md",
   "AUTORESEARCH_CODEX_FINAL.md",
@@ -41,6 +48,10 @@ const MAX_ARTIFACT_BYTES = Number(process.env.AUTORESEARCH_MAX_ARTIFACT_BYTES ??
 const TEX_BIN_DIR = "/Library/TeX/texbin";
 const PDFTOPPM_RESOLUTIONS = [240, 180, 120];
 const QUICKLOOK_SIZES = [1800, 1400, 1000];
+const MODEL_DIAGRAM_SKILL_NAME = "$model-diagram-tikz";
+const MODEL_DIAGRAM_SKILL_DIR = ".agents/skills/model-diagram-tikz";
+const MODEL_DIAGRAM_SKILL_PATH = `${MODEL_DIAGRAM_SKILL_DIR}/SKILL.md`;
+const DEFAULT_MODEL_DIAGRAM_SOURCE = "figures/model_architecture.tex";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -278,6 +289,10 @@ async function runClaim(client, claim, args) {
           cwd: workspacePath,
           command: session.benchmarkCommand,
           shell: true,
+          env: {
+            AUTORESEARCH_COMPUTE_BUDGET_SECONDS: String(runnerConfig.computeBudgetSeconds)
+          },
+          timeoutMs: runnerConfig.computeBudgetSeconds * 1000,
           stdoutStream: "benchmark_stdout",
           stderrStream: "benchmark_stderr"
         });
@@ -408,7 +423,12 @@ async function maybeRunMemoryKeeper({
       prepareMemoryPaths(repoPath, memory);
       const prompt = buildMemoryKeeperPrompt({ session, experiment, outcome, patch, memory });
       const finalPath = path.join(workspacePath, "AUTORESEARCH_MEMORY_KEEPER.md");
-      const provider = createAgentProvider(config);
+      const memoryKeeperAgent = resolveRunnerAgentConfig(session, config.runnerArgs ?? {}, config.rawSandbox ?? {}, "memoryKeeper");
+      const memoryKeeperConfig = {
+        ...memoryKeeperAgent,
+        env: resolveSandcastleEnv(config.rawSandbox ?? {}, memoryKeeperAgent.env)
+      };
+      const provider = createAgentProvider(memoryKeeperConfig);
       const printCommand = provider.buildPrintCommand({
         prompt,
         dangerouslySkipPermissions: true
@@ -582,6 +602,9 @@ function prepareWorkspace({ session, basePatch, experiment, runId, args }) {
     runSync("git", ["commit", "-m", "baseline"], destination);
   }
   applyBasePatch(destination, basePatch);
+  if (isArchitectureChange(experiment)) {
+    installModelDiagramSkill(destination);
+  }
   return destination;
 }
 
@@ -602,6 +625,12 @@ function applyBasePatch(workspacePath, basePatch) {
 }
 
 function buildAgentPrompt({ session, basePatch, experiment, priorExperiments, workspacePath }) {
+  const experimentPrompt = String(experiment.prompt || "").trim();
+  const architectureDiagramInstructions = buildArchitectureDiagramInstructions({
+    session,
+    experiment,
+    workspacePath
+  });
   const prior = priorExperiments
     .slice(-12)
     .map((item) => {
@@ -618,6 +647,7 @@ ${workspacePath}
 Session:
 - ${session.title}
 - Benchmark command: ${session.benchmarkCommand}
+- Benchmark compute budget: ${resolveComputeBudgetSeconds(session.computeBudget)} seconds
 - Target experiments: ${session.targetExperimentCount}
 - Objective priority contract:
 ${JSON.stringify(session.metricContract, null, 2)}
@@ -645,12 +675,14 @@ Experiment slot:
 - queued hypothesis: ${experiment.hypothesis}
 - change kind: ${experiment.changeKind}
 
+Worker instruction:
+${experimentPrompt || "- none provided; use the queued hypothesis as the worker instruction."}
+
 Rules:
 - Make exactly one coherent research change.
 - You may make PyTorch architecture changes if model inputs and outputs stay compatible.
 - You may make runtime config or hyperparameter changes in declared config files.
-- For architecture_change work, update the repo's TikZ model diagram source when a diagram .tex path is editable. Use .agents/skills/model-diagram-tikz/SKILL.md if present.
-- Do not commit rendered diagram PDFs or PNGs. The runner compiles changed TikZ .tex sources and stores only the PNG artifact.
+${architectureDiagramInstructions}
 - Do not edit immutable paths, benchmark code, metric parsing, data splits, datasets, or objective definitions.
 - Do not change credentials, deployment behavior, data definitions, or objective definitions.
 - Keep the change scoped and easy to inspect.
@@ -664,6 +696,104 @@ Before finishing, write AUTORESEARCH_EXPERIMENT.json in the workspace:
 }
 
 Final response must include hypothesis, files changed, validation performed, and expected metric impact.`;
+}
+
+function installModelDiagramSkill(workspacePath) {
+  const sourceDir = path.join(ROOT, ".agents", "skills", "model-diagram-tikz");
+  const targetDir = path.join(workspacePath, ".agents", "skills", "model-diagram-tikz");
+  if (!fs.existsSync(sourceDir)) {
+    throw new Error(`Model diagram skill is missing from Autoresearch: ${sourceDir}`);
+  }
+  if (fs.existsSync(targetDir)) {
+    return;
+  }
+  fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+  fs.cpSync(sourceDir, targetDir, { recursive: true });
+  runSync("git", ["add", MODEL_DIAGRAM_SKILL_DIR], workspacePath);
+  const staged = spawnSync("git", ["diff", "--cached", "--quiet"], {
+    cwd: workspacePath,
+    stdio: "ignore"
+  });
+  if (staged.status === 1) {
+    runSync(
+      "git",
+      [
+        "-c",
+        "user.email=autoresearch@example.local",
+        "-c",
+        "user.name=Autoresearch Runner",
+        "commit",
+        "-m",
+        "autoresearch model diagram skill"
+      ],
+      workspacePath
+    );
+  } else if (staged.status !== 0) {
+    throw new Error("git diff --cached --quiet failed while installing model diagram skill");
+  }
+}
+
+function buildArchitectureDiagramInstructions({ session, experiment, workspacePath }) {
+  if (!isArchitectureChange(experiment)) {
+    return "- For config_change work, do not create or edit model architecture diagrams unless the queued worker instruction explicitly asks for it.";
+  }
+
+  const existingSources = listExistingEditableTikzSources(workspacePath, session.editablePaths);
+  const creationTarget = preferredDiagramCreationTarget(session.editablePaths);
+  const sourceList = existingSources.length > 0
+    ? existingSources.map((item) => `  - ${item}`).join("\n")
+    : "  - none found";
+  const targetLine = creationTarget
+    ? `- If no editable diagram source already exists, create ${creationTarget} as a standalone TikZ/LaTeX source.`
+    : "- If no editable diagram source already exists, create one only if you can place it under an editable `.tex` path; otherwise stop and explain that the session needs an editable diagram path such as `figures/**/*.tex`.";
+
+  return `- This architecture_change is allowed to modify the model architecture, so directly use ${MODEL_DIAGRAM_SKILL_NAME}; read ${MODEL_DIAGRAM_SKILL_PATH} before editing or creating the diagram source.
+- For the diagram work, create or update only the standalone TikZ `.tex` source for this same architecture change.
+- Existing editable TikZ sources:
+${sourceList}
+${targetLine}
+- Include the changed `.tex` source in AUTORESEARCH_EXPERIMENT.json changedFiles.
+- Do not run LaTeX, call PDF/PNG export tools, or create rendered diagram PDFs or PNGs. The local runner compiles changed TikZ `.tex` sources and stores only the PNG artifact after the patch is accepted.`;
+}
+
+function listExistingEditableTikzSources(workspacePath, editablePaths) {
+  let files = [];
+  try {
+    files = gitOutput(["ls-files", "*.tex"], workspacePath)
+      .split(/\r?\n/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+  return files
+    .filter((file) => isEditable(file, editablePaths))
+    .filter((file) => isTikzSource(workspacePath, file))
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function preferredDiagramCreationTarget(editablePaths) {
+  if (isEditable(DEFAULT_MODEL_DIAGRAM_SOURCE, editablePaths)) {
+    return DEFAULT_MODEL_DIAGRAM_SOURCE;
+  }
+  for (const pattern of editablePaths ?? []) {
+    const normalized = normalizeRelativePath(pattern);
+    const lower = normalized.toLowerCase();
+    if (lower.endsWith(".tex") && !normalized.includes("*")) {
+      return normalized;
+    }
+    if (normalized.includes("*") && isEditable(DEFAULT_MODEL_DIAGRAM_SOURCE, [normalized])) {
+      return DEFAULT_MODEL_DIAGRAM_SOURCE;
+    }
+    const directoryMatch = normalized.match(/^(.*?)(?:\/\*\*\/\*\.tex|\/\*\.tex)$/iu);
+    if (directoryMatch) {
+      return `${directoryMatch[1] || "figures"}/model_architecture.tex`;
+    }
+    if (lower.endsWith("/**") && isEditable(`${normalized.slice(0, -3)}/model_architecture.tex`, [normalized])) {
+      return `${normalized.slice(0, -3)}/model_architecture.tex`;
+    }
+  }
+  return null;
 }
 
 async function runAgentDirectly({ client, runId, workspacePath, finalPath, prompt, config }) {
@@ -705,7 +835,7 @@ async function runAgentInSandcastle({
   try {
     result = await runSandcastle({
       cwd: workspacePath,
-      branchStrategy: { type: "head" },
+      branchStrategy: sandcastleBranchStrategy(config),
       sandbox: createSandcastleSandboxProvider(config),
       agent: createAgentProvider(config),
       prompt,
@@ -743,13 +873,13 @@ async function runBenchmarkInSandcastle({ client, session, experiment, runId, wo
   try {
     result = await runSandcastle({
       cwd: workspacePath,
-      branchStrategy: { type: "head" },
+      branchStrategy: sandcastleBranchStrategy(config),
       sandbox: createSandcastleSandboxProvider(config),
       agent: createBenchmarkAgent(session.benchmarkCommand, config),
       prompt: `Run the benchmark command for Autoresearch experiment #${experiment.ordinal}.`,
       maxIterations: 1,
       completionSignal: "__AUTORESEARCH_EXIT_CODE__:",
-      idleTimeoutSeconds: config.benchmarkIdleTimeoutSeconds ?? config.idleTimeoutSeconds,
+      idleTimeoutSeconds: config.computeBudgetSeconds + 30,
       hooks: createSandcastleHooks(config),
       name: `benchmark-${experiment.ordinal}`,
       logging: {
@@ -778,31 +908,56 @@ async function runBenchmarkInSandcastle({ client, session, experiment, runId, wo
 
 function resolveRunnerBackend(session, args) {
   const sandboxConfig = isPlainObject(session.sandbox) ? session.sandbox : {};
+  const environment = resolveSandboxEnvironment(session, args);
+  if (environment !== "none") {
+    return "sandcastle";
+  }
   const configured =
     args.runnerBackend ??
     args.backend ??
     process.env.AUTORESEARCH_RUNNER_BACKEND ??
     sandboxConfig.backend;
-  if (configured) {
-    return String(configured).trim().toLowerCase();
+  return String(configured ?? "direct").trim().toLowerCase() === "sandcastle"
+    ? "sandcastle"
+    : "direct";
+}
+
+function resolveSandboxEnvironment(session, args) {
+  const sandboxConfig = isPlainObject(session.sandbox) ? session.sandbox : {};
+  const configured =
+    args.sandboxEnvironment ??
+    args.sandbox ??
+    args.sandcastleProvider ??
+    args.backend ??
+    process.env.AUTORESEARCH_SANDBOX_ENVIRONMENT ??
+    process.env.AUTORESEARCH_SANDCASTLE_PROVIDER ??
+    sandboxConfig.environment ??
+    sandboxConfig.provider ??
+    sandboxConfig.backend;
+  if (!configured) {
+    return sandboxConfig.enabled === true ? "docker" : "none";
   }
-  return sandboxConfig.enabled === true ? "sandcastle" : "direct";
+  const environment = String(configured).trim().toLowerCase();
+  if (environment === "local" || environment === "direct") return "none";
+  if (environment === "sandcastle") return String(sandboxConfig.provider ?? "docker").trim().toLowerCase();
+  if (environment === "none" || environment === "docker" || environment === "podman" || environment === "vercel") {
+    return environment;
+  }
+  throw new Error(`Unsupported sandbox environment: ${environment}`);
 }
 
 function resolveRunnerConfig(session, args) {
   const raw = isPlainObject(session.sandbox) ? session.sandbox : {};
-  const sessionAgentRaw = isPlainObject(session.agent) ? session.agent : {};
-  const sandboxAgentRaw = isPlainObject(raw.agent) ? raw.agent : {};
-  const agentRaw = { ...sessionAgentRaw, ...sandboxAgentRaw };
+  const workerAgent = resolveRunnerAgentConfig(session, args, raw, "worker");
+  const workerEnv = resolveSandcastleEnv(raw, workerAgent.env);
   const repoName = path.basename(path.resolve(session.repoPath));
+  const computeBudgetSeconds = resolveComputeBudgetSeconds(session.computeBudget);
+  const environment = resolveSandboxEnvironment(session, args);
   return {
     backend: resolveRunnerBackend(session, args),
-    provider: stringOption(
-      args.sandcastleProvider,
-      process.env.AUTORESEARCH_SANDCASTLE_PROVIDER,
-      raw.provider,
-      "docker"
-    ),
+    environment,
+    provider: environment === "none" ? undefined : environment,
+    rawSandbox: raw,
     imageName: stringOption(
       args.sandcastleImage,
       process.env.AUTORESEARCH_SANDCASTLE_IMAGE,
@@ -811,85 +966,144 @@ function resolveRunnerConfig(session, args) {
     ),
     network: stringOrStringArray(raw.network),
     mounts: normalizeSandcastleMounts(raw.mounts),
-    env: resolveSandcastleEnv(raw, agentRaw),
+    env: workerEnv,
     setupCommands: normalizeCommandList(raw.setupCommands, raw.setupCommand),
     setupTimeoutMs: positiveNumber(raw.setupTimeoutMs),
-    agentProvider: stringOption(
+    agentProvider: workerAgent.agentProvider,
+    model: workerAgent.model,
+    effort: workerAgent.effort,
+    agentConfigs: {
+      worker: { ...workerAgent, env: workerEnv }
+    },
+    runnerArgs: args,
+    maxIterations: positiveInteger(raw.maxIterations, 1),
+    completionSignal: optionalStringValue(raw.completionSignal),
+    idleTimeoutSeconds: positiveInteger(raw.idleTimeoutSeconds, 600),
+    computeBudgetSeconds
+  };
+}
+
+function resolveRunnerAgentConfig(session, args, raw, role) {
+  return resolveAgentRoleConfig({
+    role,
+    sessionAgent: session.agent,
+    sandboxAgent: raw.agent,
+    args,
+    providerOverrides: [
       args.agentProvider,
       args.agent,
-      process.env.AUTORESEARCH_AGENT_PROVIDER,
-      agentRaw.provider,
-      raw.agentProvider,
-      "codex"
-    ),
-    model: stringOption(
+      process.env.AUTORESEARCH_AGENT_PROVIDER
+    ],
+    modelOverrides: [
       args.agentModel,
       args.model,
       process.env.AUTORESEARCH_AGENT_MODEL,
       args.sandcastleModel,
       process.env.AUTORESEARCH_SANDCASTLE_MODEL,
-      agentRaw.model,
-      process.env.AUTORESEARCH_CODEX_MODEL,
-      "gpt-5.4"
-    ),
-    effort: optionalStringValue(
+      process.env.AUTORESEARCH_CODEX_MODEL
+    ],
+    effortOverrides: [
       args.agentEffort,
       args.effort,
       process.env.AUTORESEARCH_AGENT_EFFORT,
       args.sandcastleEffort,
-      process.env.AUTORESEARCH_SANDCASTLE_EFFORT,
-      agentRaw.effort
-    ),
-    maxIterations: positiveInteger(raw.maxIterations, 1),
-    completionSignal: optionalStringValue(raw.completionSignal),
-    idleTimeoutSeconds: positiveInteger(raw.idleTimeoutSeconds, 600),
-    benchmarkIdleTimeoutSeconds: positiveInteger(raw.benchmarkIdleTimeoutSeconds)
-  };
+      process.env.AUTORESEARCH_SANDCASTLE_EFFORT
+    ],
+    providerFallbacks: [raw.agentProvider]
+  });
+}
+
+function resolveComputeBudgetSeconds(value) {
+  if (isPlainObject(value)) {
+    return positiveInteger(
+      value.seconds ??
+        value.durationSeconds ??
+        value.benchmarkSeconds ??
+        value.benchmarkTimeoutSeconds,
+      DEFAULT_COMPUTE_BUDGET_SECONDS
+    );
+  }
+  if (value !== undefined && value !== null && value !== "") {
+    return positiveInteger(value, DEFAULT_COMPUTE_BUDGET_SECONDS);
+  }
+  return DEFAULT_COMPUTE_BUDGET_SECONDS;
 }
 
 function createSandcastleSandboxProvider(config) {
+  if (config.environment === "vercel") {
+    return vercel({
+      token: optionalStringValue(config.rawSandbox?.token),
+      source: config.rawSandbox?.source,
+      ports: config.rawSandbox?.ports,
+      timeout: positiveNumber(config.rawSandbox?.timeout),
+      resources: config.rawSandbox?.resources,
+      runtime: optionalStringValue(config.rawSandbox?.runtime),
+      networkPolicy: config.rawSandbox?.networkPolicy,
+      projectId: optionalStringValue(config.rawSandbox?.projectId),
+      teamId: optionalStringValue(config.rawSandbox?.teamId),
+      timeoutMs: positiveNumber(config.rawSandbox?.timeoutMs),
+      template: optionalStringValue(config.rawSandbox?.template),
+      env: config.env
+    });
+  }
+
   const options = {
     imageName: config.imageName,
     mounts: config.mounts,
     env: config.env,
     network: config.network
   };
-  if (config.provider === "docker") {
+  if (config.environment === "docker") {
     return docker(options);
   }
-  if (config.provider === "podman") {
-    return podman(options);
+  if (config.environment === "podman") {
+    return podman({
+      ...options,
+      selinuxLabel: config.rawSandbox?.selinuxLabel,
+      userns: config.rawSandbox?.userns,
+      containerUid: config.rawSandbox?.containerUid,
+      containerGid: config.rawSandbox?.containerGid
+    });
   }
-  throw new Error(`Unsupported Sandcastle provider: ${config.provider}`);
+  throw new Error(`Unsupported Sandcastle environment: ${config.environment}`);
 }
 
-function createAgentProvider(config) {
-  const provider = config.agentProvider.toLowerCase();
-  if (provider === "codex") {
-    return sandcastleCodex(config.model, { effort: config.effort, env: config.env });
-  }
-  if (provider === "claude-code" || provider === "claude") {
-    return claudeCode(config.model, { effort: config.effort, env: config.env });
-  }
-  if (provider === "opencode") {
-    return opencode(config.model, { env: config.env });
-  }
-  if (provider === "pi") {
-    return pi(config.model, { env: config.env });
-  }
-  throw new Error(`Unsupported agent provider: ${config.agentProvider}`);
+function sandcastleBranchStrategy(config) {
+  return config.environment === "vercel" ? { type: "merge-to-head" } : { type: "head" };
 }
 
 function createBenchmarkAgent(command, config) {
+  const timeoutFile = ".autoresearch_benchmark_timeout";
   const script = `(
 ${command}
-) 2>&1
+) 2>&1 &
+benchmark_pid=$!
+rm -f ${timeoutFile}
+(
+  sleep ${config.computeBudgetSeconds}
+  printf 'timeout\\n' > ${timeoutFile}
+  kill -TERM "$benchmark_pid" 2>/dev/null || true
+  sleep 5
+  kill -KILL "$benchmark_pid" 2>/dev/null || true
+) &
+watchdog_pid=$!
+wait "$benchmark_pid"
 code=$?
+kill "$watchdog_pid" 2>/dev/null || true
+wait "$watchdog_pid" 2>/dev/null || true
+if [ -s ${timeoutFile} ]; then
+  printf '\\nBenchmark timed out after ${config.computeBudgetSeconds} seconds.\\n' >&2
+  code=124
+fi
+rm -f ${timeoutFile}
 printf '\\n__AUTORESEARCH_EXIT_CODE__:%s\\n' "$code"
 exit 0`;
   return {
     name: "benchmark",
-    env: config.env,
+    env: {
+      ...config.env,
+      AUTORESEARCH_COMPUTE_BUDGET_SECONDS: String(config.computeBudgetSeconds)
+    },
     captureSessions: false,
     buildPrintCommand() {
       return { command: `sh -lc ${shellEscape(script)}` };
@@ -963,37 +1177,11 @@ function defaultSandcastleImageName(repoName) {
   return `sandcastle:${normalized || "workspace"}`;
 }
 
-function resolveSandcastleEnv(raw, agentRaw) {
+function resolveSandcastleEnv(raw, agentEnv) {
   return {
-    ...envRecord(raw.env),
-    ...envRecord(agentRaw.env),
-    ...envVars(raw.envVars),
-    ...envVars(agentRaw.envVars)
+    ...resolveAgentEnv(raw),
+    ...agentEnv
   };
-}
-
-function envVars(value) {
-  if (!Array.isArray(value)) return {};
-  const env = {};
-  for (const name of value) {
-    const key = String(name || "").trim();
-    if (!key) continue;
-    const envValue = process.env[key];
-    if (envValue === undefined) {
-      throw new Error(`Missing environment variable requested by Sandcastle config: ${key}`);
-    }
-    env[key] = envValue;
-  }
-  return env;
-}
-
-function envRecord(value) {
-  if (!isPlainObject(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([key, item]) => key && item !== undefined && item !== null)
-      .map(([key, item]) => [key, String(item)])
-  );
 }
 
 function normalizeSandcastleMounts(value) {
@@ -1171,7 +1359,9 @@ async function runProcess({
   command,
   args = [],
   input,
+  env = {},
   shell = false,
+  timeoutMs,
   stdoutStream,
   stderrStream
 }) {
@@ -1179,12 +1369,15 @@ async function runProcess({
     const child = spawn(command, args, {
       cwd,
       shell,
-      env: process.env,
+      env: { ...process.env, ...env },
+      detached: Boolean(timeoutMs) && process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"]
     });
     let sequence = Date.now();
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    let killTimer;
 
     const append = async (stream, chunk) => {
       const text = chunk.toString();
@@ -1210,13 +1403,41 @@ async function runProcess({
       stderr += String(error);
     });
     child.on("close", (code) => {
-      resolve({ code: code ?? 1, stdout, stderr });
+      if (killTimer) clearTimeout(killTimer);
+      resolve({ code: timedOut ? 124 : code ?? 1, stdout, stderr, timedOut });
     });
+    if (timeoutMs) {
+      killTimer = setTimeout(() => {
+        timedOut = true;
+        void append(stderrStream, `\nBenchmark timed out after ${Math.ceil(timeoutMs / 1000)} seconds.\n`);
+        terminateProcessTree(child);
+      }, timeoutMs);
+    }
     if (input) {
       child.stdin.write(input);
     }
     child.stdin.end();
   });
+}
+
+function terminateProcessTree(child) {
+  if (!child.pid) return;
+  if (process.platform === "win32") {
+    spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+  setTimeout(() => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }, 5000).unref();
 }
 
 function parseMetrics(text, contract) {
@@ -1304,7 +1525,7 @@ async function storeDiagramArtifacts({ client, session, experiment, runId, works
   if (sources.length === 0) {
     if (requiresDiagramUpdate(session, experiment)) {
       throw new Error(
-        "architecture_change experiments must update an editable TikZ .tex diagram source"
+        "architecture_change experiments must create or update an editable TikZ .tex diagram source; add figures/**/*.tex to editablePaths if this session does not expose a diagram source path"
       );
     }
     return [];
@@ -1329,16 +1550,11 @@ async function storeDiagramArtifacts({ client, session, experiment, runId, works
 }
 
 function requiresDiagramUpdate(session, experiment) {
-  if (String(experiment.changeKind ?? "") !== "architecture_change") {
-    return false;
-  }
-  return (session.editablePaths ?? []).some((pattern) => {
-    const normalized = normalizeRelativePath(pattern).toLowerCase();
-    return normalized.endsWith(".tex") ||
-      normalized.includes("*.tex") ||
-      normalized.includes(".tikz") ||
-      normalized.startsWith("figures/");
-  });
+  return isArchitectureChange(experiment);
+}
+
+function isArchitectureChange(experiment) {
+  return String(experiment.changeKind ?? "") === "architecture_change";
 }
 
 function isTikzSource(workspacePath, file) {
@@ -1492,8 +1708,14 @@ function collectPatch(workspacePath, session, baseRef = "HEAD") {
 
 function shouldIncludePatchFile(workspacePath, file) {
   if (RUNNER_METADATA_FILES.has(file)) return false;
+  if (isPatchOutputArtifact(file)) return false;
   if (isRenderedTexArtifact(workspacePath, file)) return false;
   return !isGeneratedArtifact(file);
+}
+
+function isPatchOutputArtifact(file) {
+  const normalized = normalizeRelativePath(file);
+  return normalized === "artifacts" || normalized.startsWith("artifacts/");
 }
 
 function isRenderedTexArtifact(workspacePath, file) {
@@ -1639,17 +1861,33 @@ function texProcessEnv() {
 
 function isEditable(file, editablePatterns) {
   const normalized = normalizeRelativePath(file);
-  return editablePatterns.some((pattern) => globMatch(normalized, normalizeRelativePath(pattern)));
+  return (editablePatterns ?? []).some((pattern) => globMatch(normalized, normalizeRelativePath(pattern)));
 }
 
 function globMatch(file, pattern) {
-  const escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "__DOUBLE_STAR__")
-    .replace(/\*/g, "[^/]*")
-    .replace(/__DOUBLE_STAR__/g, ".*");
-  const regex = new RegExp(`^${escaped}$`);
+  const regex = new RegExp(`^${globToRegexSource(pattern)}$`);
   return regex.test(file);
+}
+
+function globToRegexSource(pattern) {
+  let source = "";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    const next = pattern[index + 1];
+    const afterNext = pattern[index + 2];
+    if (char === "*" && next === "*" && afterNext === "/") {
+      source += "(?:.*/)?";
+      index += 2;
+    } else if (char === "*" && next === "*") {
+      source += ".*";
+      index += 1;
+    } else if (char === "*") {
+      source += "[^/]*";
+    } else {
+      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return source;
 }
 
 function normalizeRelativePath(value) {

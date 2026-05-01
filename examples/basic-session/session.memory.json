@@ -4,8 +4,10 @@
   "repoPath": "../target-project",
   "baseRef": "HEAD",
   "benchmarkCommand": "npm test -- --json",
+  "computeBudget": { "seconds": 300 },
   "targetExperimentCount": 10,
   "maxConcurrentRuns": 1,
+  "maxPlannedConcurrentExperiments": 3,
   "editablePaths": [
     "src/model.ts",
     "config/tunable.json"
@@ -18,6 +20,16 @@
     "config/tunable.json"
   ],
   "modelIoContract": "Preserve the existing command line interface and metric output.",
+  "agent": {
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "effort": "high",
+    "researcher": { "model": "gpt-5.4", "effort": "high" },
+    "planner": { "model": "gpt-5.4", "effort": "high" },
+    "reviewer": { "model": "gpt-5.4", "effort": "high" },
+    "worker": { "model": "gpt-5.4", "effort": "high" },
+    "memoryKeeper": { "model": "gpt-5.4", "effort": "high" }
+  },
   "memory": {
     "enabled": true,
     "rootPath": "research",
@@ -25,6 +37,7 @@
       "references"
     ]
   },
+  "sandbox": { "environment": "none" },
   "metricContract": {
     "rankingMode": "lexicographic",
     "metrics": [

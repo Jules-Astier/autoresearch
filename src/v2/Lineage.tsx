@@ -31,7 +31,6 @@ export function Lineage({ lineage, selectedExperimentId, onSelect }: Props) {
   });
   const viewBoxRef = useRef(viewBox);
   viewBoxRef.current = viewBox;
-  const handledWheelEventsRef = useRef<WeakSet<WheelEvent>>(new WeakSet());
   const [hasFitted, setHasFitted] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
 
@@ -71,8 +70,6 @@ export function Lineage({ lineage, selectedExperimentId, onSelect }: Props) {
   const hasLineage = lineage.trunk.length > 0 || lineage.branches.length > 0;
 
   function panFromWheel(e: WheelEvent, canvasEl: HTMLDivElement) {
-    if (handledWheelEventsRef.current.has(e)) return;
-    handledWheelEventsRef.current.add(e);
     e.preventDefault();
     const rect = canvasEl.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return;
@@ -168,9 +165,6 @@ export function Lineage({ lineage, selectedExperimentId, onSelect }: Props) {
       className="lineage-canvas"
       ref={containerRef}
       style={{ height: VIEW_H, userSelect: isPanning ? "none" : undefined }}
-      onWheelCapture={(e) => {
-        if (containerRef.current && hasLineage) panFromWheel(e.nativeEvent, containerRef.current);
-      }}
     >
       <svg
         ref={svgRef}

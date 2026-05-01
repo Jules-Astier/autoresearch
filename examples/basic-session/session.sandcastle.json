@@ -4,8 +4,10 @@
   "repoPath": "../target-project",
   "baseRef": "HEAD",
   "benchmarkCommand": "npm test -- --json",
+  "computeBudget": { "seconds": 300 },
   "targetExperimentCount": 10,
   "maxConcurrentRuns": 1,
+  "maxPlannedConcurrentExperiments": 3,
   "editablePaths": [
     "src/model.ts",
     "config/tunable.json"
@@ -22,7 +24,10 @@
     "provider": "codex",
     "model": "gpt-5.4",
     "effort": "high",
-    "envVars": ["OPENAI_API_KEY"]
+    "envVars": ["OPENAI_API_KEY"],
+    "planner": { "model": "gpt-5.4", "effort": "high" },
+    "reviewer": { "model": "gpt-5.4", "effort": "high" },
+    "worker": { "model": "gpt-5.4", "effort": "high" }
   },
   "metricContract": {
     "rankingMode": "lexicographic",
@@ -32,8 +37,7 @@
     ]
   },
   "sandbox": {
-    "backend": "sandcastle",
-    "provider": "docker",
+    "environment": "docker",
     "imageName": "sandcastle:target-project",
     "setupCommand": "npm ci",
     "mounts": [

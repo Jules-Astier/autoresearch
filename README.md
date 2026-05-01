@@ -46,6 +46,22 @@ lives under `.convex/` and is intentionally ignored by git.
 
 ## Register A Session
 
+Initialize Autoresearch files inside a target project:
+
+```bash
+cd /path/to/target-project
+autoresearch init
+```
+
+This creates `.autoresearch/` with setup docs for users and agents, plus a
+reference session at `.autoresearch/sessions/example`.
+
+Print an exact setup guide and starter `session.json` for a session folder:
+
+```bash
+autoresearch session guide ./my-session --repo-path ../target-project
+```
+
 Create a session directory in any project:
 
 ```text
@@ -62,7 +78,7 @@ my-session/
 Register it:
 
 ```bash
-autoresearch register /path/to/my-session
+autoresearch session add /path/to/my-session
 ```
 
 See [docs/session-dir.md](docs/session-dir.md) and
@@ -76,8 +92,10 @@ The required runtime fields are:
 - `title`
 - `repoPath`
 - `benchmarkCommand`
+- `computeBudget` (optional, defaults to 5 minutes)
 - `targetExperimentCount`
 - `maxConcurrentRuns`
+- `maxPlannedConcurrentExperiments` (optional, defaults to 3)
 - `editablePaths`
 - `metricContract.metrics`
 
@@ -88,25 +106,40 @@ Metric contracts use the order of `metrics` as the objective priority when
 `repoPath` is resolved relative to the session directory when registered.
 Editable and immutable paths are relative to the target repo.
 
-The benchmark command runs inside an isolated workspace. Sessions can opt into a
-Sandcastle-backed Docker or Podman sandbox for agent and benchmark execution,
-and can select `codex`, `claude-code`, `opencode`, or `pi` as the worker agent.
+The benchmark command runs inside an isolated workspace under
+`~/.autoresearch/runner` by default. Sessions can opt into Sandcastle-backed
+Docker, Podman, or Vercel execution for agent and benchmark runs, and can select
+`codex`, `claude-code`, `opencode`, or `pi` for each role under `agent`.
 Metrics are parsed from the last JSON object in benchmark output or from
 `metric_name: 1.23` lines.
+
+`computeBudget` controls how long the runner lets each benchmark execute. Omit
+it for the 5 minute default, or set `"computeBudget": { "seconds": 600 }`. The
+benchmark process also receives `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
+
+`maxPlannedConcurrentExperiments` controls planner batch size for that session.
+`sandbox.environment` selects where workers and benchmarks run: `none` for host
+execution, or `docker`, `podman`, or `vercel` through Sandcastle.
 
 Sessions can also opt into durable research memory with a `memory` block. The
 researcher runs before planning to turn notes and references into candidate
 hypotheses; the memory keeper runs after each run to update repo-local notes,
 duplicate warnings, and campaign context.
 
+Top-level `agent.provider`/`agent.model` are defaults for `researcher`,
+`planner`, `reviewer`, `worker`, and `memoryKeeper`. Override a role with
+`agent.planner.model`, `agent.worker.provider`, etc., or with process overrides
+such as `AUTORESEARCH_PLANNER_AGENT_MODEL`.
+
 ## TikZ Diagrams
 
-Architecture-change experiments can keep a TikZ source diagram in the target
-repo, for example `figures/model_architecture.tex`. Add the `.tex` source to
-`editablePaths`; keep rendered `figures/**/*.pdf` and `figures/**/*.png`
-immutable. The runner compiles changed TikZ sources after an accepted patch,
-uses the PDF only as a temporary intermediate, and stores only the PNG in
-Convex `researchArtifacts`.
+Architecture-change experiments must create or update a TikZ source diagram in
+the target repo. Add an editable `.tex` path or glob such as
+`figures/**/*.tex` to `editablePaths`; the source file may be created by the
+worker when it is missing. The agent edits only `.tex` diagram sources. Keep
+rendered `figures/**/*.pdf` and `figures/**/*.png` immutable. The local runner
+compiles changed TikZ sources after an accepted patch, uses the PDF only as a
+temporary intermediate, and stores only the PNG in Convex `researchArtifacts`.
 
 Verify the local TeX toolchain before running architecture sessions:
 
@@ -124,7 +157,10 @@ autoresearch install-tex --macos
 
 ```bash
 autoresearch dev
-autoresearch register ./my-session
+autoresearch init
+autoresearch session guide ./my-session --repo-path ../target-project
+autoresearch session add ./my-session
+autoresearch session add ./my-session --dry-run
 autoresearch doctor
 autoresearch runner --once
 autoresearch orchestrator --once

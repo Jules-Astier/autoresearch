@@ -121,6 +121,9 @@ body.lab-frontier-scroll-locked {
 .lab-ledger .header-meta .btn {
   font-family: var(--face-sans);
 }
+.lab-ledger .header-meta .btn-console {
+  color: var(--ink-2);
+}
 .lab-ledger .heartbeat {
   display: inline-flex;
   align-items: center;
@@ -561,6 +564,13 @@ body.lab-frontier-scroll-locked {
   margin-bottom: 4px;
   /* allow wrap; truncating swallows hypothesis content */
 }
+.lab-ledger .ledger-row .ledger-subline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-width: 0;
+}
 .lab-ledger .ledger-row .ledger-status {
   display: inline-flex;
   align-items: center;
@@ -568,11 +578,22 @@ body.lab-frontier-scroll-locked {
   font-family: var(--face-mono);
   font-size: 12px;
   color: var(--ink-3);
-  margin-right: 12px;
 }
 .lab-ledger .ledger-row .ledger-status .glyph {
   font-size: 13px;
   font-weight: 600;
+}
+.lab-ledger .ledger-row .ledger-reason {
+  min-width: 0;
+  max-width: 100%;
+  font-family: var(--face-mono);
+  font-size: 12px;
+  color: var(--oxblood);
+  overflow-wrap: anywhere;
+}
+.lab-ledger .ledger-row .ledger-reason::before {
+  content: "because ";
+  color: var(--ink-3);
 }
 .lab-ledger .ledger-row .ledger-metrics {
   font-family: var(--face-mono);
@@ -790,6 +811,25 @@ body.lab-frontier-scroll-locked {
   justify-content: flex-end;
   background: var(--paper-1);
 }
+.lab-ledger .failure-note,
+.lab-ledger .run-error {
+  font-family: var(--face-mono);
+  font-size: 12px;
+  color: var(--oxblood);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lab-ledger .failure-note {
+  margin: 0;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border: 1px solid rgba(138, 58, 46, 0.22);
+  border-radius: var(--r-md);
+  background: var(--oxblood-soft);
+}
+.lab-ledger .run-error {
+  margin-top: 4px;
+}
 
 /* ── buttons ───────────────────────────────────────────────── */
 .lab-ledger .btn {
@@ -806,6 +846,7 @@ body.lab-frontier-scroll-locked {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  text-decoration: none;
 }
 .lab-ledger .btn:hover {
   background: var(--paper-2);

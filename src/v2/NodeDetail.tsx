@@ -41,6 +41,8 @@ export function NodeDetail({
   const experimentPatches = patches.filter((p) => p.experimentId === experiment._id);
   const experimentArtifacts = artifacts.filter((a) => a.experimentId === experiment._id);
   const status = String(experiment.status ?? "");
+  const failureReason =
+    status === "failed" && !isRolledBack ? String(experiment.failureReason ?? "").trim() : "";
 
   const metricEntries = Object.entries(experiment.metrics ?? {}).sort(
     ([a], [b]) =>
@@ -69,6 +71,13 @@ export function NodeDetail({
         </header>
 
         <div className="sheet-body">
+          {failureReason ? (
+            <div className="sheet-section">
+              <h4>failure</h4>
+              <p className="failure-note">{failureReason}</p>
+            </div>
+          ) : null}
+
           {metricEntries.length > 0 ? (
             <div className="sheet-section">
               <h4>metrics</h4>
@@ -125,6 +134,7 @@ export function NodeDetail({
                       <td>
                         <span className={`status-glyph ${r.status}`}>{statusGlyph(r.status)}</span>{" "}
                         run #{r.runNumber} · {r.workerId}
+                        {r.error ? <div className="run-error">{r.error}</div> : null}
                       </td>
                       <td style={{ color: "var(--ink-3)" }}>
                         {r.startedAtUtc ? formatRelativeShort(r.startedAtUtc) : "—"}

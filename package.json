@@ -7,7 +7,8 @@
     "autoresearch": "./bin/autoresearch.mjs"
   },
   "scripts": {
-    "register": "node bin/autoresearch.mjs register",
+    "init:project": "node bin/autoresearch.mjs init",
+    "session:add": "node bin/autoresearch.mjs session add",
     "doctor": "node bin/autoresearch.mjs doctor",
     "install-tex:macos": "node bin/autoresearch.mjs install-tex --macos",
     "start": "node scripts/dev-stack.mjs",

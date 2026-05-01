@@ -4,8 +4,10 @@
   "repoPath": "../target-project",
   "baseRef": "HEAD",
   "benchmarkCommand": "npm test -- --json",
+  "computeBudget": { "seconds": 300 },
   "targetExperimentCount": 10,
   "maxConcurrentRuns": 1,
+  "maxPlannedConcurrentExperiments": 3,
   "editablePaths": [
     "src/model.ts",
     "config/tunable.json"
@@ -18,6 +20,7 @@
     "config/tunable.json"
   ],
   "modelIoContract": "Preserve the existing command line interface and metric output.",
+  "sandbox": { "environment": "none" },
   "metricContract": {
     "rankingMode": "lexicographic",
     "metrics": [

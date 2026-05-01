@@ -90,9 +90,8 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
         <div className="frontier-aside">
           {!empty && delta !== undefined && stalledSince === 0 ? (
             <div
-              className={`frontier-delta ${
-                isImprovement(delta, direction) ? "up" : delta === 0 ? "flat" : "down"
-              }`}
+              className={`frontier-delta ${isImprovement(delta, direction) ? "up" : delta === 0 ? "flat" : "down"
+                }`}
             >
               {formatDelta(direction === "minimize" ? -delta : delta)} since prior best
             </div>
@@ -109,9 +108,8 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
         <div className="frontier-stalled">
           stalled — {stalledSince} experiment{stalledSince === 1 ? "" : "s"} since last improvement
           {bestPoint
-            ? ` (#${bestPoint.ordinal}${
-                session?.updatedAtUtc ? ` · ${formatRelativeShort(session.updatedAtUtc)}` : ""
-              })`
+            ? ` (#${bestPoint.ordinal}${session?.updatedAtUtc ? ` · ${formatRelativeShort(session.updatedAtUtc)}` : ""
+            })`
             : ""}
         </div>
       ) : null}
@@ -438,13 +436,6 @@ function Chart({
         >
           {useLog ? "log" : "lin"}
         </button>
-      </div>
-
-      <div className="frontier-chart-meta">
-        <span>
-          {points.length} points · {pxPerPoint}px/point · {useLog ? "log y-axis" : "linear y-axis"} · scroll horizontally for history
-        </span>
-        <span>{direction}</span>
       </div>
     </div>
   );

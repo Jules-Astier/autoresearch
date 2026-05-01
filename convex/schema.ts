@@ -62,8 +62,10 @@ export default defineSchema({
     baseRef: v.optional(v.string()),
     benchmarkCommand: v.string(),
     metricParserCommand: v.optional(v.string()),
+    computeBudget: v.optional(v.any()),
     targetExperimentCount: v.float64(),
     maxConcurrentRuns: v.float64(),
+    maxPlannedConcurrentExperiments: v.optional(v.float64()),
     completedExperimentCount: v.float64(),
     activeRunCount: v.float64(),
     nextExperimentOrdinal: v.float64(),
@@ -230,6 +232,20 @@ export default defineSchema({
   })
     .index("by_session", ["sessionId", "createdAtUtc"])
     .index("by_run", ["runId", "createdAtUtc"]),
+
+  researchMemoryNotes: defineTable({
+    sessionId: v.id("researchSessions"),
+    path: v.string(),
+    kind: v.string(),
+    content: v.optional(v.string()),
+    entries: v.optional(v.array(v.string())),
+    byteLength: v.optional(v.float64()),
+    contentHash: v.optional(v.string()),
+    updatedAtUtc: v.string(),
+    updatedByRunId: v.optional(v.id("researchRuns"))
+  })
+    .index("by_session", ["sessionId"])
+    .index("by_session_path", ["sessionId", "path"]),
 
   researchRollbacks: defineTable({
     sessionId: v.id("researchSessions"),

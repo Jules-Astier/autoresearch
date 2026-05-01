@@ -66,6 +66,8 @@ export function Ledger({
             : undefined;
         const deltaShown = delta !== undefined && objectiveValue !== undefined;
         const deltaSign = direction === "minimize" && delta !== undefined ? -delta : delta ?? 0;
+        const failureReason =
+          status === "failed" && !isDead ? String(e.failureReason ?? "").trim() : "";
 
         return (
           <div
@@ -82,7 +84,7 @@ export function Ledger({
             <div className="ord">#{e.ordinal}</div>
             <div className="body">
               <div className="hyp">{e.hypothesis || <em>(no hypothesis)</em>}</div>
-              <div>
+              <div className="ledger-subline">
                 <span className="ledger-status">
                   <span className={`status-glyph ${isDead ? "rolled_back" : status}`}>
                     {isDead ? statusGlyph("rolled_back") : statusGlyph(status)}
@@ -92,6 +94,11 @@ export function Ledger({
                     {e.promoted && !isDead ? " · promoted" : ""}
                   </span>
                 </span>
+                {failureReason ? (
+                  <span className="ledger-reason" title={failureReason}>
+                    {failureReason}
+                  </span>
+                ) : null}
                 {topObjective && objectiveValue !== undefined ? (
                   <span className="ledger-metrics ledger-metric">
                     {topObjective} <strong>{formatMetricValue(objectiveValue)}</strong>

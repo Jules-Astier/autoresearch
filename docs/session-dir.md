@@ -5,6 +5,18 @@ can live anywhere on disk and should be small enough to check into the target
 project or keep beside it. The only file the CLI requires today is
 `session.json`.
 
+For a project-local scaffold, run this from the target repository root:
+
+```bash
+autoresearch init
+```
+
+That creates `.autoresearch/` with setup docs for users and agents, plus a
+reference session under `.autoresearch/sessions/example`. For real campaigns,
+copy the example to `.autoresearch/sessions/<slug>` and edit the copied
+contract. From that location, `repoPath` usually points back to the repository
+root with `../../..`.
+
 ```text
 my-session/
   session.json                  # required machine-readable contract
@@ -26,8 +38,9 @@ my-session/
 
 Keep the target repository itself outside the session directory. `repoPath` in
 `session.json` points at that repository. Runner-created workspaces are separate
-disposable copies or git worktrees under the runner workspace root; they are not
-part of the session directory contract.
+disposable copies or git worktrees under the runner workspace root, which
+defaults to `~/.autoresearch/runner`; they are not part of the session directory
+contract.
 
 `goal.md`, `metric_contract.md`, prompts, context notes, baselines, and
 references are optional for the current runtime. Treat them as stable source
@@ -60,8 +73,10 @@ environment instead.
   "repoPath": "../target-project",
   "baseRef": "HEAD",
   "benchmarkCommand": "npm test -- --json",
+  "computeBudget": { "seconds": 300 },
   "targetExperimentCount": 20,
   "maxConcurrentRuns": 2,
+  "maxPlannedConcurrentExperiments": 3,
   "editablePaths": ["src/model.ts", "config/tunable.json", "figures/model_architecture.tex"],
   "immutablePaths": ["data/**", "config/fixed.json", "figures/**/*.pdf", "figures/**/*.png"],
   "runtimeConfigPaths": ["config/tunable.json"],
@@ -69,12 +84,20 @@ environment instead.
   "agent": {
     "provider": "codex",
     "model": "gpt-5.4",
-    "effort": "high"
+    "effort": "high",
+    "researcher": { "model": "gpt-5.4", "effort": "high" },
+    "planner": { "model": "gpt-5.4", "effort": "high" },
+    "reviewer": { "model": "gpt-5.4", "effort": "high" },
+    "worker": { "model": "gpt-5.4", "effort": "high" },
+    "memoryKeeper": { "model": "gpt-5.4", "effort": "high" }
   },
   "memory": {
     "enabled": true,
     "rootPath": "research",
     "referencePaths": ["references"]
+  },
+  "sandbox": {
+    "environment": "none"
   },
   "metricContract": {
     "rankingMode": "lexicographic",
@@ -100,6 +123,16 @@ The benchmark command runs inside an isolated copy or git worktree of the target
 repository. The runner accepts metrics from the last JSON object printed by the
 benchmark or from lines shaped like `metric_name: 1.23`.
 
+`computeBudget.seconds` is the benchmark wall-clock budget for each run. It
+defaults to 300 seconds when omitted. Registration also accepts shorthand
+duration values such as `"computeBudget": "5m"` or `"computeBudget": 300`, but
+stores the normalized object form. The runner also exposes the value to the
+benchmark process as `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
+
+`maxPlannedConcurrentExperiments` controls how many independent experiments the
+planner may propose in a single planning cycle. It defaults to 3 and is capped by
+the remaining target experiment count.
+
 ## Durable Research Memory
 
 Add a `memory` block to make researcher and memory-keeper roles first-class for
@@ -124,10 +157,10 @@ a session:
 ```
 
 All `memory` paths are relative to `repoPath`, not the session directory. When a
-planning cycle starts, the orchestrator optionally runs a read-only researcher
-before the planner. The researcher reads the configured memory and reference
-paths, rejects duplicates and stale ideas, and emits candidate single-change
-hypotheses for the planner and reviewer.
+planning cycle starts, the orchestrator optionally runs a researcher before the
+planner. The researcher reads the configured memory and reference paths, rejects
+duplicates and stale ideas, and emits candidate single-change hypotheses for the
+planner and reviewer.
 
 After a run completes or fails inside the runner, the memory keeper optionally
 updates the configured memory files in the target repo. It is prompted to edit
@@ -142,16 +175,21 @@ keeper are skipped. Individual roles can be disabled with
 ## TikZ Architecture Artifacts
 
 When architecture changes should be visible as diagrams, add a standalone TikZ
-source file to `editablePaths`, usually under `figures/`. Keep rendered PDF and
-PNG outputs in `immutablePaths`; workers should edit only the `.tex` source.
+source path or glob to `editablePaths`, usually `figures/**/*.tex`. The source
+file can be absent at session start; architecture-change workers must create it
+or update it as part of the same change. Keep rendered PDF and PNG outputs in
+`immutablePaths`; workers edit only the `.tex` diagram source and do not render
+diagram files themselves.
 
 For accepted patches, the runner detects changed TikZ `.tex` sources, compiles a
 temporary PDF, converts it to PNG, and stores only the PNG bytes in
-`researchArtifacts`. The PDF is not persisted.
+`researchArtifacts`. This happens locally after the patch is accepted. The PDF
+is not persisted.
 
-Architecture experiments are required to update a TikZ source when the session
-has an editable diagram path. Use the repo-local skill at
-`.agents/skills/model-diagram-tikz/SKILL.md` for diagram style and validation.
+Architecture experiments are required to create or update an editable TikZ
+source. Worker prompts directly invoke `$model-diagram-tikz` and use the
+repo-local skill at `.agents/skills/model-diagram-tikz/SKILL.md` for diagram
+style and validation.
 
 Check the local toolchain with:
 
@@ -167,8 +205,9 @@ autoresearch install-tex --macos
 
 ## Agent Provider
 
-The local runner uses Sandcastle's agent provider interface for host-direct and
-Sandcastle-backed execution. `agent.provider` may be `codex`, `claude-code`,
+The orchestrator and runner use Sandcastle's agent provider interface. The
+orchestrator roles are `researcher`, `planner`, and `reviewer`; the runner roles
+are `worker` and `memoryKeeper`. `agent.provider` may be `codex`, `claude-code`,
 `opencode`, or `pi`.
 
 ```json
@@ -177,27 +216,57 @@ Sandcastle-backed execution. `agent.provider` may be `codex`, `claude-code`,
     "provider": "claude-code",
     "model": "claude-sonnet-4-6",
     "effort": "high",
-    "envVars": ["ANTHROPIC_API_KEY"]
+    "envVars": ["ANTHROPIC_API_KEY"],
+    "planner": {
+      "provider": "codex",
+      "model": "gpt-5.4",
+      "effort": "high",
+      "envVars": ["OPENAI_API_KEY"]
+    },
+    "reviewer": {
+      "provider": "claude-code",
+      "model": "claude-sonnet-4-6"
+    },
+    "worker": {
+      "provider": "codex",
+      "model": "gpt-5.4"
+    },
+    "memoryKeeper": {
+      "provider": "claude-code",
+      "model": "claude-sonnet-4-6"
+    }
   }
 }
 ```
 
-When omitted, the runner defaults to Codex with `gpt-5.4`. `envVars` passes
-named variables from the runner process into the agent command. Do not put secret
-values directly in `session.json`, because the session contract is stored in
-Convex.
+Top-level `agent` fields are defaults for every role. `agent.<role>` overrides
+the default for that role. When omitted, every role defaults to Codex with
+`gpt-5.4`. `envVars` passes named variables from the local orchestrator or runner
+process into the agent command. Do not put secret values directly in
+`session.json`, because the session contract is stored in Convex.
+
+Role-specific CLI and environment overrides are also supported. For example,
+`--planner-agent-provider`, `--planner-agent-model`,
+`AUTORESEARCH_PLANNER_AGENT_PROVIDER`, and
+`AUTORESEARCH_PLANNER_AGENT_MODEL` override only the planner. Global overrides
+such as `--agent-provider`, `--agent-model`, `AUTORESEARCH_AGENT_PROVIDER`, and
+`AUTORESEARCH_AGENT_MODEL` apply to all roles in that process.
 
 ## Optional Sandcastle Runtime
 
 By default the local runner creates a disposable workspace and runs the selected
-agent directly on the host. A session can opt into Sandcastle-backed execution
-for the agent and benchmark by adding a `sandbox` block:
+agent directly on the host. Configure `sandbox.environment` to choose where the
+agent and benchmark execute:
+
+- `none`: run locally on the host.
+- `docker`: run through Sandcastle using Docker.
+- `podman`: run through Sandcastle using Podman.
+- `vercel`: run through Sandcastle using Vercel Firecracker microVMs.
 
 ```json
 {
   "sandbox": {
-    "backend": "sandcastle",
-    "provider": "docker",
+    "environment": "docker",
     "imageName": "sandcastle:target-project",
     "setupCommand": "npm ci",
     "envVars": ["OPENAI_API_KEY"],
@@ -211,16 +280,19 @@ for the agent and benchmark by adding a `sandbox` block:
 }
 ```
 
-`provider` may be `docker` or `podman`. `imageName` should point at a local image
-that contains the project runtime plus the selected agent CLI. `setupCommand` or
+For Docker and Podman, `imageName` should point at a local image that contains
+the project runtime plus the selected agent CLI. `setupCommand` or
 `setupCommands` run inside each sandbox before the agent or benchmark command.
 Use `sandbox.envVars` only for variables needed by setup or benchmark commands;
-agent credentials usually belong in `agent.envVars`.
+agent credentials usually belong in `agent.envVars`. Vercel environments accept
+Sandcastle's Vercel options such as `runtime`, `projectId`, `teamId`, `token`,
+`resources`, and `timeoutMs`.
 
-You can also force the backend for a runner process without changing a session:
+You can also force the sandbox environment for a runner process without changing
+a session:
 
 ```bash
-AUTORESEARCH_RUNNER_BACKEND=sandcastle autoresearch runner --once
+AUTORESEARCH_SANDBOX_ENVIRONMENT=docker autoresearch runner --once
 ```
 
 See `examples/basic-session/session.sandcastle.json` for a complete sample
@@ -234,20 +306,32 @@ Start the local stack:
 autoresearch dev
 ```
 
+Initialize project-local session docs and a reference session:
+
+```bash
+autoresearch init
+```
+
+Print exact setup guidance and a starter contract for a session folder:
+
+```bash
+autoresearch session guide /path/to/my-session --repo-path /path/to/target-project
+```
+
 Register a session from any directory:
 
 ```bash
-autoresearch register /path/to/my-session
+autoresearch session add /path/to/my-session
 ```
 
 If the stack is not using the default `.env.local`, pass the Convex URL:
 
 ```bash
-autoresearch register /path/to/my-session --convex-url http://127.0.0.1:3210
+autoresearch session add /path/to/my-session --convex-url http://127.0.0.1:3210
 ```
 
 Validate the resolved payload without contacting Convex:
 
 ```bash
-autoresearch register /path/to/my-session --dry-run
+autoresearch session add /path/to/my-session --dry-run
 ```

@@ -6,8 +6,10 @@ export type NewSessionPayload = {
   title: string;
   repoPath: string;
   benchmarkCommand: string;
+  computeBudget?: { seconds?: number; [key: string]: unknown } | number | string;
   targetExperimentCount: number;
   maxConcurrentRuns: number;
+  maxPlannedConcurrentExperiments?: number;
   editablePaths: string[];
   immutablePaths: string[];
   metricContract: {
@@ -27,7 +29,7 @@ export type NewSessionPayload = {
   runtimeConfigPaths?: string[];
   modelIoContract?: string;
   agent?: unknown;
-  sandbox?: unknown;
+  sandbox?: { environment?: string; backend?: string; provider?: string; [key: string]: unknown } | string;
   earlyStopping?: unknown;
 };
 
@@ -214,12 +216,14 @@ function ContractPreview({ payload }: { payload: NewSessionPayload }) {
         <ContractItem label="repo path" value={payload.repoPath} wide />
         <ContractItem label="benchmark" value={payload.benchmarkCommand} wide />
         <ContractItem label="base ref" value={payload.baseRef || "HEAD"} />
+        <ContractItem label="compute budget" value={formatComputeBudget(payload.computeBudget)} />
         <ContractItem
           label="experiments"
           value={`${payload.targetExperimentCount} target · ${payload.maxConcurrentRuns} runner${
             payload.maxConcurrentRuns === 1 ? "" : "s"
-          }`}
+          } · ${payload.maxPlannedConcurrentExperiments ?? 3} max plan`}
         />
+        <ContractItem label="sandbox" value={formatSandboxEnvironment(payload.sandbox)} />
         <ContractItem
           label="objective"
           value={`${objective.name || "unspecified"} · ${objective.direction || "unknown"}`}
@@ -306,4 +310,39 @@ function objectiveSummary(metricContract: NewSessionPayload["metricContract"]) {
       topObjective?.direction ||
       metricContract.metrics?.[0]?.direction,
   };
+}
+
+function formatComputeBudget(value: NewSessionPayload["computeBudget"]) {
+  const seconds =
+    typeof value === "object" && value !== null
+      ? Number(value.seconds ?? 300)
+      : value === undefined || value === null || value === ""
+        ? 300
+        : Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return "5 min";
+  }
+  if (seconds % 3600 === 0) {
+    return `${seconds / 3600} hr`;
+  }
+  if (seconds % 60 === 0) {
+    return `${seconds / 60} min`;
+  }
+  return `${seconds}s`;
+}
+
+function formatSandboxEnvironment(value: NewSessionPayload["sandbox"]) {
+  if (typeof value === "string") {
+    return normalizeSandboxLabel(value);
+  }
+  return normalizeSandboxLabel(
+    value?.environment ?? value?.provider ?? value?.backend ?? "none",
+  );
+}
+
+function normalizeSandboxLabel(value: unknown) {
+  const environment = String(value ?? "none").trim().toLowerCase();
+  if (environment === "local" || environment === "direct") return "none";
+  if (environment === "sandcastle") return "docker";
+  return environment || "none";
 }

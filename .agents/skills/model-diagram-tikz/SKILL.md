@@ -19,7 +19,20 @@ Create paper-quality ML architecture figures as reproducible TikZ/LaTeX source a
 
 Never stop at source code only unless the user explicitly asks for source only.
 
-For Autoresearch runs, commit only the `.tex` source. The runner compiles the PDF as a temporary intermediate and persists only the PNG artifact.
+## Autoresearch Source-Only Mode
+
+When this skill is invoked inside an Autoresearch experiment worker prompt, do
+only the source-editing part of the workflow:
+
+- Create or update only the standalone TikZ `.tex` source.
+- If the run has no existing editable diagram source, create one under an
+  editable diagram path such as `figures/model_architecture.tex`.
+- Do not compile LaTeX, export PDF, export PNG, inspect rendered images, or
+  leave rendered files in the workspace.
+- Do not edit generated `.pdf` or `.png` diagram artifacts.
+
+The Autoresearch runner compiles the accepted `.tex` source locally, uses PDF as
+a temporary intermediate, and persists only the PNG artifact.
 
 ## Diagram Grammar
 

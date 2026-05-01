@@ -52,8 +52,10 @@ export function LabLedger() {
   const patches = detail?.patches ?? [];
   const artifacts = detail?.artifacts ?? [];
   const messages = detail?.messages ?? [];
+  const planningCycles = detail?.planningCycles ?? [];
   const activeLogs = detail?.activeLogs ?? [];
   const activeRun = detail?.activeRun ?? null;
+  const activePlanningCycle = planningCycles.find((cycle: any) => cycle.status === "running");
   const activeExperiment = activeRun
     ? experiments.find((e) => e._id === activeRun.experimentId)
     : undefined;
@@ -81,7 +83,10 @@ export function LabLedger() {
   const selectedPatch = diffPatchId ? patches.find((p: any) => p._id === diffPatchId) : undefined;
 
   const lastUpdate = session?.updatedAtUtc ?? session?.heartbeatAtUtc;
-  const isLive = Boolean(activeRun) || (session?.activeRunCount ?? 0) > 0;
+  const isLive =
+    Boolean(activeRun) ||
+    Boolean(activePlanningCycle) ||
+    (session?.activeRunCount ?? 0) > 0;
 
   return (
     <div className="lab-ledger">
@@ -113,6 +118,7 @@ export function LabLedger() {
               <Toolbar
                 session={session}
                 workerControl={workerControl}
+                activePlanningCycle={activePlanningCycle}
                 onPause={() => void pauseSession({ sessionId: session._id })}
                 onResume={() => void resumeSession({ sessionId: session._id })}
                 onStop={() =>
@@ -130,9 +136,13 @@ export function LabLedger() {
                     });
                   }
                 }}
-                onSetPlannerCount={(count) =>
-                  void setWorkerControl({ desiredPlannerCount: count })
-                }
+                onSetPlannerCount={(count) => {
+                  void setWorkerControl({ desiredPlannerCount: count });
+                  void setSessionConcurrency({
+                    sessionId: session._id,
+                    maxPlannedConcurrentExperiments: count,
+                  });
+                }}
               />
 
               <Frontier

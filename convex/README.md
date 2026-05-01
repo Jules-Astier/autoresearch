@@ -40,24 +40,31 @@ npm run convex:seed
   independent experiments for parallel execution.
 
 Use `npm run orchestrator:codex` to plan and review experiment batches, then use
-`npm run runner:codex` to consume queued experiments. The runner uses the
-session's `agent.provider` through Sandcastle's agent-provider interface. It runs
+`npm run runner:codex` to consume queued experiments. The orchestrator and runner
+use the session's `agent` config through Sandcastle's agent-provider interface;
+role overrides can be set at `agent.researcher`, `agent.planner`,
+`agent.reviewer`, `agent.worker`, and `agent.memoryKeeper`. The runner executes
 directly on the host by default, or in Sandcastle when the registered session has
-`sandbox.backend: "sandcastle"` or the runner process sets
-`AUTORESEARCH_RUNNER_BACKEND=sandcastle`.
+`sandbox.environment` is `docker`, `podman`, or `vercel`, or the runner process
+sets `AUTORESEARCH_SANDBOX_ENVIRONMENT` to one of those values.
 
 External projects register sessions through
 `orchestration.registerResearchSession`. The CLI reads a session directory,
 normalizes relative `repoPath` values to absolute paths, and sends the session
 contract to that mutation.
 
-`researchWorkerControls` stores the desired local runner count. The browser
-updates this row, and `npm run dev:stack` keeps one orchestrator running per
-active session while reconciling the runner count into local agent subprocesses.
+`researchWorkerControls` stores fallback desired local runner and planner
+counts. Session contracts can override planner batch size with
+`maxPlannedConcurrentExperiments`; the browser writes the selected session value
+when the max-plan control changes.
 
 The runner records a patch after the agent edits and before benchmarks run. A run can
 complete only when it references an accepted patch, so metrics are always linked
 to a concrete code state.
+
+Registered sessions carry a normalized `computeBudget` object. The runner uses
+`computeBudget.seconds` as the wall-clock timeout for benchmark execution, with
+a 300 second default for sessions that omit it.
 
 When a session has a `memory` block, the orchestrator runs an optional read-only
 researcher before the planner and stores its output with the planning cycle. The

@@ -6,9 +6,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api.js";
+import {
+  createAgentProvider,
+  resolveAgentRoleConfig
+} from "./agent-providers.mjs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DEFAULT_WORKSPACE_ROOT = path.resolve(ROOT, "..", ".runtime", "codex-orchestrator");
+const MODEL_DIAGRAM_SKILL_NAME = "$model-diagram-tikz";
+const MODEL_DIAGRAM_SKILL_PATH = ".agents/skills/model-diagram-tikz/SKILL.md";
+const DEFAULT_MODEL_DIAGRAM_SOURCE = "figures/model_architecture.tex";
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -21,7 +28,7 @@ async function main() {
   const client = new ConvexHttpClient(convexUrl);
   const workerId = args.workerId ?? `planner-${os.hostname()}-${process.pid}`;
   const pollMs = Number(args.pollMs ?? 10000);
-  console.log(`Codex orchestrator ${workerId} connected to ${convexUrl}`);
+  console.log(`Agent orchestrator ${workerId} connected to ${convexUrl}`);
 
   while (true) {
     const claim = await client.mutation(api.orchestration.claimPlanningCycle, {
@@ -63,7 +70,9 @@ async function runPlanningCycle(client, claim, args) {
 
   const memorySnapshot = readMemorySnapshot(repoPath, session.memory);
   const researcherOutput = shouldRunResearcher(session)
-    ? await runCodex({
+    ? await runOrchestratorAgent({
+        role: "researcher",
+        session,
         cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
         outputPath: path.join(cycleDir, "researcher-final.md"),
         prompt: buildResearcherPrompt({ session, experiments, patches, requestedCount, memorySnapshot }),
@@ -81,7 +90,9 @@ async function runPlanningCycle(client, claim, args) {
     memorySnapshot,
     research
   });
-  const plannerOutput = await runCodex({
+  const plannerOutput = await runOrchestratorAgent({
+    role: "planner",
+    session,
     cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
     outputPath: path.join(cycleDir, "planner-final.md"),
     prompt: plannerPrompt,
@@ -98,7 +109,9 @@ async function runPlanningCycle(client, claim, args) {
     memorySnapshot,
     research
   });
-  const reviewerOutput = await runCodex({
+  const reviewerOutput = await runOrchestratorAgent({
+    role: "reviewer",
+    session,
     cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
     outputPath: path.join(cycleDir, "reviewer-final.md"),
     prompt: reviewerPrompt,
@@ -112,6 +125,7 @@ async function runPlanningCycle(client, claim, args) {
     throw new Error("reviewer approved no experiments");
   }
 
+  console.log(`Finishing planning cycle ${planningCycleId} with ${approved.length} approved experiments`);
   await client.mutation(api.orchestration.finishPlanningCycle, {
     planningCycleId,
     researcherOutput: researcherOutput || undefined,
@@ -136,6 +150,7 @@ ${JSON.stringify({
   title: session.title,
   slug: session.slug,
   benchmarkCommand: session.benchmarkCommand,
+  computeBudget: session.computeBudget,
   requestedCount,
   editablePaths: session.editablePaths,
   immutablePaths: session.immutablePaths,
@@ -161,6 +176,9 @@ Rules:
 - Read the configured memory and reference paths when they exist.
 - Do not edit files, run benchmarks, or claim a result is a win without benchmark evidence.
 - Translate references into clean single-change hypotheses that fit editable paths.
+- For architecture_change candidates, write the worker prompt so the worker directly uses ${MODEL_DIAGRAM_SKILL_NAME}, reads ${MODEL_DIAGRAM_SKILL_PATH}, and creates or updates only an editable TikZ `.tex` model diagram source for the diagram artifact.
+- If no diagram source exists yet for an architecture_change, tell the worker to create one, preferably ${DEFAULT_MODEL_DIAGRAM_SOURCE} when that path is editable.
+- Tell the worker not to compile, render, or create PDF/PNG diagram files; the local runner processes the accepted `.tex` source into PNG.
 - Reject ideas already present in current code, prior experiments, or do-not-repeat guidance.
 - Prefer concrete follow-ups over broad research themes.
 ${memory?.researcher?.instructions ? `\nAdditional researcher instructions:\n${memory.researcher.instructions}` : ""}
@@ -199,9 +217,11 @@ ${JSON.stringify({
   title: session.title,
   slug: session.slug,
   benchmarkCommand: session.benchmarkCommand,
+  computeBudget: session.computeBudget,
   targetExperimentCount: session.targetExperimentCount,
   completedExperimentCount: session.completedExperimentCount,
   maxConcurrentRuns: session.maxConcurrentRuns,
+  maxPlannedConcurrentExperiments: session.maxPlannedConcurrentExperiments,
   editablePaths: session.editablePaths,
   immutablePaths: session.immutablePaths,
   runtimeConfigPaths: session.runtimeConfigPaths,
@@ -228,6 +248,9 @@ Rules:
 - Avoid duplicate or stale hypotheses.
 - Use durable memory and researcher candidates to avoid repeats and stale ideas.
 - Each experiment must be one coherent change.
+- For architecture_change experiments, include worker instructions to use ${MODEL_DIAGRAM_SKILL_NAME}, read ${MODEL_DIAGRAM_SKILL_PATH}, and create or update only an editable TikZ `.tex` model diagram source for the diagram artifact.
+- If an architecture_change has no existing diagram source, tell the worker to create one, preferably ${DEFAULT_MODEL_DIAGRAM_SOURCE} when that path is editable.
+- Tell the worker not to compile, render, or create PDF/PNG diagram files; the local runner processes the accepted `.tex` source into PNG.
 - Do not change data, benchmark command, metric parsing, immutable files, target definitions, credentials, or deployment behavior.
 
 Return only JSON:
@@ -269,6 +292,11 @@ ${research ? JSON.stringify(research, null, 2) : "- researcher disabled or no ca
 Planner proposal:
 ${JSON.stringify(plan, null, 2)}
 
+Rules:
+- Reject architecture_change proposals whose worker prompt does not require ${MODEL_DIAGRAM_SKILL_NAME} and creation or update of only an editable TikZ `.tex` model diagram source for the diagram artifact.
+- Reject architecture_change proposals that need a new diagram source but do not name an editable `.tex` path such as ${DEFAULT_MODEL_DIAGRAM_SOURCE}.
+- Reject architecture_change proposals that ask the worker to compile, render, or create PDF/PNG diagram files.
+
 Return only JSON:
 {
   "approvedExperiments": [
@@ -284,28 +312,67 @@ Return only JSON:
 }`;
 }
 
-async function runCodex({ cwd, outputPath, prompt, args, dryRunOutput }) {
+async function runOrchestratorAgent({ role, session, cwd, outputPath, prompt, args, dryRunOutput }) {
   if (args.dryRun) {
     return JSON.stringify(dryRunOutput ?? dryRunPlan(1));
   }
 
-  const codexBin = args.codexBin ?? process.env.AUTORESEARCH_CODEX_BIN ?? "codex";
-  const codexArgs = [
-    "exec",
-    "--cd",
+  const config = resolveOrchestratorAgentConfig(session, args, role);
+  const provider = createAgentProvider(config);
+  const printCommand = provider.buildPrintCommand({
+    prompt,
+    dangerouslySkipPermissions: false
+  });
+  console.log(`Running ${role} with ${config.agentProvider}/${config.model}`);
+  const result = await runAgentProviderCommand({
+    role,
     cwd,
-    "--skip-git-repo-check",
-    "--output-last-message",
-    outputPath,
-    "--sandbox",
-    "read-only",
-    "-"
-  ];
-  await runProcess(codexBin, codexArgs, prompt, cwd);
-  if (!fs.existsSync(outputPath)) {
-    throw new Error(`Codex did not write output: ${outputPath}`);
+    command: printCommand.command,
+    input: printCommand.stdin,
+    env: provider.env,
+    provider
+  });
+  const final = result.result || result.stdout || "";
+  fs.writeFileSync(outputPath, final, "utf8");
+  if (result.code !== 0) {
+    throw new Error(`${role} ${config.agentProvider} exited ${result.code}: ${(result.stderr || final).slice(-2000)}`);
   }
-  return fs.readFileSync(outputPath, "utf8");
+  if (!final.trim()) {
+    throw new Error(`${role} ${config.agentProvider} completed without output`);
+  }
+  return final;
+}
+
+function resolveOrchestratorAgentConfig(session, args, role) {
+  const sandbox = isPlainObject(session.sandbox) ? session.sandbox : {};
+  return resolveAgentRoleConfig({
+    role,
+    sessionAgent: session.agent,
+    sandboxAgent: sandbox.agent,
+    args,
+    providerOverrides: [
+      args.orchestratorAgentProvider,
+      args.agentProvider,
+      args.agent,
+      process.env.AUTORESEARCH_ORCHESTRATOR_AGENT_PROVIDER,
+      process.env.AUTORESEARCH_AGENT_PROVIDER
+    ],
+    modelOverrides: [
+      args.orchestratorAgentModel,
+      args.agentModel,
+      args.model,
+      process.env.AUTORESEARCH_ORCHESTRATOR_AGENT_MODEL,
+      process.env.AUTORESEARCH_AGENT_MODEL,
+      process.env.AUTORESEARCH_CODEX_MODEL
+    ],
+    effortOverrides: [
+      args.orchestratorAgentEffort,
+      args.agentEffort,
+      args.effort,
+      process.env.AUTORESEARCH_ORCHESTRATOR_AGENT_EFFORT,
+      process.env.AUTORESEARCH_AGENT_EFFORT
+    ]
+  });
 }
 
 function dryRunPlan() {
@@ -539,19 +606,62 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function runProcess(command, args, input, cwd) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+function runAgentProviderCommand({ role, cwd, command, input, env, provider }) {
+  return new Promise((resolve) => {
+    const child = spawn("sh", ["-lc", command], {
       cwd,
-      env: process.env,
-      stdio: ["pipe", "inherit", "inherit"]
+      env: { ...process.env, ...env },
+      stdio: ["pipe", "pipe", "pipe"]
     });
-    child.on("error", reject);
+    let stdout = "";
+    let stderr = "";
+    let result = "";
+    let stdoutLineBuffer = "";
+
+    const emitParsedLine = (line) => {
+      const parsed = provider.parseStreamLine(line);
+      if (parsed.length === 0) {
+        if (line.trim()) process.stdout.write(`${line}\n`);
+        return;
+      }
+      for (const event of parsed) {
+        if (event.type === "text") {
+          process.stdout.write(event.text);
+        } else if (event.type === "result") {
+          result = event.result;
+        } else if (event.type === "tool_call") {
+          process.stdout.write(`[${role} tool:${event.name}] ${event.args}\n`);
+        }
+      }
+    };
+
+    child.stdout.on("data", (chunk) => {
+      const text = chunk.toString();
+      stdout += text;
+      stdoutLineBuffer += text;
+      const lines = stdoutLineBuffer.split(/\r?\n/);
+      stdoutLineBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        emitParsedLine(line);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      const text = chunk.toString();
+      stderr += text;
+      process.stderr.write(text);
+    });
+    child.on("error", (error) => {
+      stderr += String(error);
+    });
     child.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${command} exited ${code}`));
+      if (stdoutLineBuffer) {
+        emitParsedLine(stdoutLineBuffer);
+      }
+      resolve({ code: code ?? 1, stdout, stderr, result });
     });
-    child.stdin.write(input);
+    if (input) {
+      child.stdin.write(input);
+    }
     child.stdin.end();
   });
 }

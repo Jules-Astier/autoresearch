@@ -5,6 +5,8 @@ import { promotionMilestoneIdsForSession } from "./promotionHistory";
 
 const metricMap = v.record(v.string(), v.float64());
 const WORKER_CONTROL_KEY = "local";
+const DEFAULT_COMPUTE_BUDGET_SECONDS = 300;
+const PLANNING_CYCLE_STALE_MS = 30 * 60 * 1000;
 
 const createSessionArgs = {
   slug: v.string(),
@@ -13,8 +15,10 @@ const createSessionArgs = {
   baseRef: v.optional(v.string()),
   benchmarkCommand: v.string(),
   metricParserCommand: v.optional(v.string()),
+  computeBudget: v.optional(v.any()),
   targetExperimentCount: v.float64(),
   maxConcurrentRuns: v.float64(),
+  maxPlannedConcurrentExperiments: v.optional(v.float64()),
   editablePaths: v.array(v.string()),
   immutablePaths: v.array(v.string()),
   runtimeConfigPaths: v.optional(v.array(v.string())),
@@ -81,6 +85,10 @@ export const getSessionDetail = query({
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .order("desc")
       .take(20);
+    const memoryNotes = await ctx.db
+      .query("researchMemoryNotes")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
     const promotionMilestoneIds = promotionMilestoneIdsForSession(
       session.metricContract,
       experiments.map((experiment) => ({
@@ -108,6 +116,7 @@ export const getSessionDetail = query({
       session,
       experiments: experiments.map((experiment) => ({
         ...experiment,
+        failureReason: failureReasonForExperiment(experiment, runs, patches),
         promoted:
           experiment.promoted || promotionMilestoneIds.has(String(experiment._id)),
       })),
@@ -118,6 +127,7 @@ export const getSessionDetail = query({
       artifacts,
       planningCycles,
       rollbacks,
+      memoryNotes,
       activeRun,
       activeLogs: activeLogs.reverse(),
     };
@@ -145,6 +155,14 @@ export const createResearchSession = mutation({
   handler: async (ctx, args) => {
     const now = nowUtc();
     const metricContract = normalizeMetricContract(args.metricContract);
+    const computeBudget = normalizeComputeBudget(args.computeBudget);
+    const maxPlannedConcurrentExperiments = normalizeInteger(
+      args.maxPlannedConcurrentExperiments ?? 3,
+      "maxPlannedConcurrentExperiments",
+      1,
+      64,
+    );
+    const sandbox = normalizeSandboxConfig(args.sandbox);
     const existing = await ctx.db
       .query("researchSessions")
       .withIndex("by_slug", (q) => q.eq("slug", args.slug))
@@ -161,8 +179,10 @@ export const createResearchSession = mutation({
       baseRef: args.baseRef,
       benchmarkCommand: args.benchmarkCommand,
       metricParserCommand: args.metricParserCommand,
+      computeBudget,
       targetExperimentCount: args.targetExperimentCount,
       maxConcurrentRuns: args.maxConcurrentRuns,
+      maxPlannedConcurrentExperiments,
       completedExperimentCount: 0,
       activeRunCount: 0,
       nextExperimentOrdinal: 1,
@@ -175,7 +195,7 @@ export const createResearchSession = mutation({
       agent: args.agent,
       memory: args.memory,
       metricContract,
-      sandbox: args.sandbox,
+      sandbox,
       earlyStopping: args.earlyStopping,
       createdAtUtc: now,
       updatedAtUtc: now,
@@ -184,7 +204,7 @@ export const createResearchSession = mutation({
       sessionId,
       type: "session.created",
       message: `Created session ${args.slug}`,
-      payload: { targetExperimentCount: args.targetExperimentCount },
+      payload: { targetExperimentCount: args.targetExperimentCount, computeBudget, maxPlannedConcurrentExperiments, sandbox },
     });
     return sessionId;
   },
@@ -195,6 +215,14 @@ export const registerResearchSession = mutation({
   handler: async (ctx, args) => {
     const now = nowUtc();
     const metricContract = normalizeMetricContract(args.metricContract);
+    const computeBudget = normalizeComputeBudget(args.computeBudget);
+    const maxPlannedConcurrentExperiments = normalizeInteger(
+      args.maxPlannedConcurrentExperiments ?? 3,
+      "maxPlannedConcurrentExperiments",
+      1,
+      64,
+    );
+    const sandbox = normalizeSandboxConfig(args.sandbox);
     const existing = await ctx.db
       .query("researchSessions")
       .withIndex("by_slug", (q) => q.eq("slug", args.slug))
@@ -209,8 +237,10 @@ export const registerResearchSession = mutation({
         baseRef: args.baseRef,
         benchmarkCommand: args.benchmarkCommand,
         metricParserCommand: args.metricParserCommand,
+        computeBudget,
         targetExperimentCount: args.targetExperimentCount,
         maxConcurrentRuns: args.maxConcurrentRuns,
+        maxPlannedConcurrentExperiments,
         completedExperimentCount: 0,
         activeRunCount: 0,
         nextExperimentOrdinal: 1,
@@ -223,7 +253,7 @@ export const registerResearchSession = mutation({
         agent: args.agent,
         memory: args.memory,
         metricContract,
-        sandbox: args.sandbox,
+        sandbox,
         earlyStopping: args.earlyStopping,
         createdAtUtc: now,
         updatedAtUtc: now,
@@ -232,7 +262,7 @@ export const registerResearchSession = mutation({
         sessionId,
         type: "session.registered",
         message: `Registered session ${args.slug}`,
-        payload: { targetExperimentCount: args.targetExperimentCount },
+        payload: { targetExperimentCount: args.targetExperimentCount, computeBudget, maxPlannedConcurrentExperiments, sandbox },
       });
       return sessionId;
     }
@@ -243,8 +273,10 @@ export const registerResearchSession = mutation({
       baseRef: args.baseRef,
       benchmarkCommand: args.benchmarkCommand,
       metricParserCommand: args.metricParserCommand,
+      computeBudget,
       targetExperimentCount: args.targetExperimentCount,
       maxConcurrentRuns: args.maxConcurrentRuns,
+      maxPlannedConcurrentExperiments,
       editablePaths: args.editablePaths,
       immutablePaths: args.immutablePaths,
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
@@ -252,7 +284,7 @@ export const registerResearchSession = mutation({
       agent: args.agent,
       memory: args.memory,
       metricContract,
-      sandbox: args.sandbox,
+      sandbox,
       earlyStopping: args.earlyStopping,
       updatedAtUtc: now,
     });
@@ -262,8 +294,11 @@ export const registerResearchSession = mutation({
       message: `Updated registered session ${args.slug}`,
       payload: {
         repoPath: args.repoPath,
+        computeBudget,
         targetExperimentCount: args.targetExperimentCount,
         maxConcurrentRuns: args.maxConcurrentRuns,
+        maxPlannedConcurrentExperiments,
+        sandbox,
       },
     });
     return existing._id;
@@ -274,6 +309,8 @@ export const updateResearchSessionContract = mutation({
   args: {
     sessionId: v.id("researchSessions"),
     benchmarkCommand: v.optional(v.string()),
+    computeBudget: v.optional(v.any()),
+    maxPlannedConcurrentExperiments: v.optional(v.float64()),
     editablePaths: v.optional(v.array(v.string())),
     immutablePaths: v.optional(v.array(v.string())),
     runtimeConfigPaths: v.optional(v.array(v.string())),
@@ -289,6 +326,15 @@ export const updateResearchSessionContract = mutation({
     const patch: Record<string, unknown> = { updatedAtUtc: nowUtc() };
     if (args.benchmarkCommand !== undefined)
       patch.benchmarkCommand = args.benchmarkCommand;
+    if (args.computeBudget !== undefined)
+      patch.computeBudget = normalizeComputeBudget(args.computeBudget);
+    if (args.maxPlannedConcurrentExperiments !== undefined)
+      patch.maxPlannedConcurrentExperiments = normalizeInteger(
+        args.maxPlannedConcurrentExperiments,
+        "maxPlannedConcurrentExperiments",
+        1,
+        64,
+      );
     if (args.editablePaths !== undefined)
       patch.editablePaths = args.editablePaths;
     if (args.immutablePaths !== undefined)
@@ -304,7 +350,7 @@ export const updateResearchSessionContract = mutation({
     if (args.metricContract !== undefined)
       patch.metricContract = normalizeMetricContract(args.metricContract);
     if (args.sandbox !== undefined)
-      patch.sandbox = args.sandbox;
+      patch.sandbox = normalizeSandboxConfig(args.sandbox);
     if (args.earlyStopping !== undefined)
       patch.earlyStopping = args.earlyStopping;
     await ctx.db.patch(args.sessionId, patch);
@@ -313,6 +359,8 @@ export const updateResearchSessionContract = mutation({
       type: "session.contract_updated",
       message: "Updated session contract.",
       payload: {
+        computeBudget: args.computeBudget,
+        maxPlannedConcurrentExperiments: args.maxPlannedConcurrentExperiments,
         editablePaths: args.editablePaths,
         immutablePaths: args.immutablePaths,
         runtimeConfigPaths: args.runtimeConfigPaths,
@@ -389,11 +437,13 @@ export const claimPlanningCycle = mutation({
     if (session.status !== "running") {
       return null;
     }
-    const existing = await ctx.db
-      .query("researchPlanningCycles")
-      .withIndex("by_status", (q) => q.eq("status", "running"))
-      .collect();
-    if (existing.some((cycle) => cycle.sessionId === session._id)) {
+    const now = nowUtc();
+    const activePlanningCycles = await activePlanningCyclesForSession(
+      ctx,
+      session._id,
+      now,
+    );
+    if (activePlanningCycles.length > 0) {
       return null;
     }
 
@@ -422,7 +472,10 @@ export const claimPlanningCycle = mutation({
       .withIndex("by_key", (q) => q.eq("key", WORKER_CONTROL_KEY))
       .first();
     const desiredPlannerCount = normalizeInteger(
-      args.requestedCount ?? control?.desiredPlannerCount ?? 3,
+      args.requestedCount ??
+        session.maxPlannedConcurrentExperiments ??
+        control?.desiredPlannerCount ??
+        3,
       "requestedCount",
       1,
       64,
@@ -431,7 +484,6 @@ export const claimPlanningCycle = mutation({
       remaining,
       desiredPlannerCount,
     );
-    const now = nowUtc();
     const cycleId = await ctx.db.insert("researchPlanningCycles", {
       sessionId: session._id,
       status: "running",
@@ -485,6 +537,15 @@ export const finishPlanningCycle = mutation({
     if (!cycle) {
       throw new Error(`missing planning cycle ${args.planningCycleId}`);
     }
+    if (cycle.status !== "running") {
+      await insertEvent(ctx, {
+        sessionId: cycle.sessionId,
+        type: "planning.finish_ignored",
+        message: `Ignored finish for ${cycle.status} planning cycle.`,
+        payload: { planningCycleId: args.planningCycleId },
+      });
+      return [];
+    }
     await ctx.db.patch(args.planningCycleId, {
       researcherOutput: args.researcherOutput?.slice(-20000),
       plannerOutput: args.plannerOutput.slice(-20000),
@@ -533,6 +594,9 @@ export const failPlanningCycle = mutation({
     const cycle = await ctx.db.get(args.planningCycleId);
     if (!cycle) {
       throw new Error(`missing planning cycle ${args.planningCycleId}`);
+    }
+    if (cycle.status !== "running") {
+      return;
     }
     const now = nowUtc();
     await ctx.db.patch(args.planningCycleId, {
@@ -699,6 +763,53 @@ export const appendAgentMessage = mutation({
   },
 });
 
+export const recordMemoryNotes = mutation({
+  args: {
+    sessionId: v.id("researchSessions"),
+    runId: v.optional(v.id("researchRuns")),
+    notes: v.array(
+      v.object({
+        path: v.string(),
+        kind: v.string(),
+        content: v.optional(v.string()),
+        entries: v.optional(v.array(v.string())),
+        byteLength: v.optional(v.float64()),
+        contentHash: v.optional(v.string()),
+      }),
+    ),
+  },
+  handler: async (ctx, { sessionId, runId, notes }) => {
+    const now = nowUtc();
+    for (const note of notes) {
+      const existing = await ctx.db
+        .query("researchMemoryNotes")
+        .withIndex("by_session_path", (q) =>
+          q.eq("sessionId", sessionId).eq("path", note.path),
+        )
+        .first();
+      const fields = {
+        sessionId,
+        path: note.path,
+        kind: note.kind,
+        content: note.content,
+        entries: note.entries,
+        byteLength: note.byteLength,
+        contentHash: note.contentHash,
+        updatedAtUtc: now,
+        updatedByRunId: runId,
+      };
+      if (existing) {
+        if (existing.contentHash && existing.contentHash === note.contentHash) {
+          continue;
+        }
+        await ctx.db.patch(existing._id, fields);
+      } else {
+        await ctx.db.insert("researchMemoryNotes", fields);
+      }
+    }
+  },
+});
+
 export const updateExperimentPlan = mutation({
   args: {
     experimentId: v.id("researchExperiments"),
@@ -858,6 +969,10 @@ export const completeRun = mutation({
     const session = await mustGetSession(ctx, run.sessionId);
     const now = nowUtc();
     const status = args.benchmarkExitCode === 0 ? "completed" : "failed";
+    const failureReason =
+      status === "failed"
+        ? `benchmark exited with ${args.benchmarkExitCode}`
+        : undefined;
     const score = scoreMetrics(session.metricContract, args.metrics);
     const promoted =
       status === "completed" && isNewBest(session, score, args.metrics);
@@ -869,6 +984,7 @@ export const completeRun = mutation({
       metrics: args.metrics,
       score,
       summary: args.summary,
+      ...(failureReason ? { error: failureReason } : {}),
       finishedAtUtc: now,
     });
     await ctx.db.patch(run.experimentId, {
@@ -905,8 +1021,13 @@ export const completeRun = mutation({
       type: status === "completed" ? "run.completed" : "run.failed",
       message: promoted
         ? "Run completed and became the current best."
-        : `Run ${status}.`,
-      payload: { metrics: args.metrics, score, promoted },
+        : failureReason ?? `Run ${status}.`,
+      payload: {
+        metrics: args.metrics,
+        score,
+        promoted,
+        ...(failureReason ? { error: failureReason } : {}),
+      },
     });
     return { status, score, promoted, sessionStatus: nextStatus };
   },
@@ -1231,28 +1352,43 @@ export const rollbackSession = mutation({
 export const setSessionConcurrency = mutation({
   args: {
     sessionId: v.id("researchSessions"),
-    maxConcurrentRuns: v.float64(),
+    maxConcurrentRuns: v.optional(v.float64()),
+    maxPlannedConcurrentExperiments: v.optional(v.float64()),
   },
   handler: async (ctx, args) => {
-    const maxConcurrentRuns = normalizeInteger(
-      args.maxConcurrentRuns,
-      "maxConcurrentRuns",
-      1,
-      64,
-    );
+    if (
+      args.maxConcurrentRuns === undefined &&
+      args.maxPlannedConcurrentExperiments === undefined
+    ) {
+      throw new Error("setSessionConcurrency requires at least one concurrency value");
+    }
     await mustGetSession(ctx, args.sessionId);
     const now = nowUtc();
-    await ctx.db.patch(args.sessionId, {
-      maxConcurrentRuns,
-      updatedAtUtc: now,
-    });
+    const patch: Record<string, unknown> = { updatedAtUtc: now };
+    if (args.maxConcurrentRuns !== undefined) {
+      patch.maxConcurrentRuns = normalizeInteger(
+        args.maxConcurrentRuns,
+        "maxConcurrentRuns",
+        1,
+        64,
+      );
+    }
+    if (args.maxPlannedConcurrentExperiments !== undefined) {
+      patch.maxPlannedConcurrentExperiments = normalizeInteger(
+        args.maxPlannedConcurrentExperiments,
+        "maxPlannedConcurrentExperiments",
+        1,
+        64,
+      );
+    }
+    await ctx.db.patch(args.sessionId, patch);
     await insertEvent(ctx, {
       sessionId: args.sessionId,
       type: "session.concurrency_updated",
-      message: `Set max concurrent runs to ${maxConcurrentRuns}.`,
-      payload: { maxConcurrentRuns },
+      message: "Updated session concurrency.",
+      payload: patch,
     });
-    return { maxConcurrentRuns };
+    return patch;
   },
 });
 
@@ -1317,8 +1453,10 @@ export const seedControlPlaneDemo = mutation({
       status: "running",
       repoPath: "../examples/pytorch-classifier",
       benchmarkCommand: "uv run python train.py",
+      computeBudget: { seconds: DEFAULT_COMPUTE_BUDGET_SECONDS },
       targetExperimentCount: 6,
       maxConcurrentRuns: 1,
+      maxPlannedConcurrentExperiments: 3,
       completedExperimentCount: 2,
       activeRunCount: 1,
       nextExperimentOrdinal: 1,
@@ -1656,6 +1794,58 @@ async function firstRunnableSession(
   return null;
 }
 
+async function activePlanningCyclesForSession(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+  now: string,
+): Promise<Doc<"researchPlanningCycles">[]> {
+  const runningCycles = await ctx.db
+    .query("researchPlanningCycles")
+    .withIndex("by_status", (q: any) => q.eq("status", "running"))
+    .collect();
+  const active: Doc<"researchPlanningCycles">[] = [];
+
+  for (const cycle of runningCycles.filter(
+    (item: Doc<"researchPlanningCycles">) => item.sessionId === sessionId,
+  )) {
+    if (!isStalePlanningCycle(cycle, now)) {
+      active.push(cycle);
+      continue;
+    }
+
+    await ctx.db.patch(cycle._id, {
+      status: "failed",
+      error: "Planning cycle expired without completion.",
+      completedAtUtc: now,
+    });
+    await insertEvent(ctx, {
+      sessionId,
+      type: "planning.expired",
+      message: "Expired stale planning cycle.",
+      payload: {
+        planningCycleId: cycle._id,
+        plannerWorkerId: cycle.plannerWorkerId,
+        startedAtUtc: cycle.startedAtUtc,
+      },
+    });
+  }
+
+  return active;
+}
+
+function isStalePlanningCycle(
+  cycle: Doc<"researchPlanningCycles">,
+  now: string,
+): boolean {
+  const startedAtMs = Date.parse(cycle.startedAtUtc);
+  const nowMs = Date.parse(now);
+  return (
+    Number.isFinite(startedAtMs) &&
+    Number.isFinite(nowMs) &&
+    nowMs - startedAtMs > PLANNING_CYCLE_STALE_MS
+  );
+}
+
 async function nextRunNumber(
   ctx: any,
   experimentId: Id<"researchExperiments">,
@@ -1796,6 +1986,54 @@ function isCompletedStatus(status: string): boolean {
   return status === "completed" || status === "complete" || status === "ok";
 }
 
+function failureReasonForExperiment(
+  experiment: Doc<"researchExperiments">,
+  runs: Doc<"researchRuns">[],
+  patches: Doc<"researchPatches">[],
+): string | undefined {
+  if (experiment.status !== "failed") {
+    return undefined;
+  }
+
+  const latestRuns = runs
+    .filter((run) => run.experimentId === experiment._id)
+    .sort((a, b) => b.runNumber - a.runNumber);
+  const failedRun =
+    latestRuns.find((run) => run.status === "failed" || Boolean(run.error)) ??
+    latestRuns[0];
+
+  const runError = compactFailureReason(failedRun?.error);
+  if (runError) {
+    return runError;
+  }
+
+  const rejectedPatch = patches.find(
+    (patch) => patch.experimentId === experiment._id && patch.rejectionReason,
+  );
+  const patchReason = compactFailureReason(rejectedPatch?.rejectionReason);
+  if (patchReason) {
+    return patchReason;
+  }
+
+  if (failedRun?.benchmarkExitCode !== undefined && failedRun.benchmarkExitCode !== 0) {
+    return `benchmark exited with ${failedRun.benchmarkExitCode}`;
+  }
+
+  if (failedRun?.codexExitCode !== undefined && failedRun.codexExitCode !== 0) {
+    return `agent exited with ${failedRun.codexExitCode}`;
+  }
+
+  return "reason not recorded";
+}
+
+function compactFailureReason(reason: unknown): string | undefined {
+  const text = String(reason ?? "").replace(/\s+/g, " ").trim();
+  if (!text) {
+    return undefined;
+  }
+  return text.length > 220 ? `${text.slice(0, 217)}...` : text;
+}
+
 function bestExperimentForSession(
   session: Doc<"researchSessions">,
   experiments: Array<Doc<"researchExperiments">>,
@@ -1866,6 +2104,142 @@ function lexicographicMetricsImprove(
     return direction === "maximize" ? delta > 0 : delta < 0;
   }
   return false;
+}
+
+function normalizeComputeBudget(value: any): any {
+  if (value === undefined || value === null || value === "") {
+    return { seconds: DEFAULT_COMPUTE_BUDGET_SECONDS };
+  }
+  if (typeof value === "number" || typeof value === "string") {
+    return { seconds: parseDurationSeconds(value, "computeBudget") };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("computeBudget must be an object, number of seconds, or duration string");
+  }
+
+  const secondsValue =
+    value.seconds ??
+    value.durationSeconds ??
+    value.benchmarkSeconds ??
+    value.benchmarkTimeoutSeconds;
+  const minutesValue = value.minutes ?? value.durationMinutes;
+  const seconds =
+    secondsValue !== undefined && secondsValue !== null && secondsValue !== ""
+      ? parseDurationSeconds(secondsValue, "computeBudget.seconds")
+      : minutesValue !== undefined && minutesValue !== null && minutesValue !== ""
+        ? parseDurationMinutes(minutesValue, "computeBudget.minutes")
+        : DEFAULT_COMPUTE_BUDGET_SECONDS;
+  return { ...value, seconds };
+}
+
+function normalizeSandboxConfig(value: any): any {
+  if (value === undefined || value === null || value === "") {
+    return { environment: "none", backend: "direct" };
+  }
+  if (typeof value === "string") {
+    return normalizeSandboxConfig({ environment: value });
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("sandbox must be an object or environment string when provided");
+  }
+  const rawEnvironment =
+    optionalString(value.environment) ??
+    optionalString(value.provider) ??
+    optionalString(value.backend) ??
+    "none";
+  const environment = normalizeSandboxEnvironment(rawEnvironment, "sandbox.environment");
+  const rawBackend = optionalString(value.backend)?.toLowerCase();
+  if (
+    rawBackend !== undefined &&
+    rawBackend !== "sandcastle" &&
+    rawBackend !== "direct" &&
+    rawBackend !== "none" &&
+    rawBackend !== "local" &&
+    rawBackend !== "docker" &&
+    rawBackend !== "podman" &&
+    rawBackend !== "vercel"
+  ) {
+    throw new Error(
+      "sandbox.backend must be none, local, direct, sandcastle, docker, podman, or vercel",
+    );
+  }
+  const provider = optionalString(value.provider)?.toLowerCase();
+  if (
+    provider !== undefined &&
+    provider !== "none" &&
+    provider !== "local" &&
+    provider !== "docker" &&
+    provider !== "podman" &&
+    provider !== "vercel"
+  ) {
+    throw new Error("sandbox.provider must be none, docker, podman, or vercel");
+  }
+
+  const backend = environment === "none" ? "direct" : "sandcastle";
+  const normalized = { ...value, environment, backend };
+  if (environment === "none") {
+    delete normalized.provider;
+  } else {
+    normalized.provider = environment;
+  }
+  return normalized;
+}
+
+function normalizeSandboxEnvironment(value: unknown, field: string): string {
+  const environment = String(value).trim().toLowerCase();
+  if (environment === "local" || environment === "direct") {
+    return "none";
+  }
+  if (
+    environment !== "none" &&
+    environment !== "docker" &&
+    environment !== "podman" &&
+    environment !== "vercel" &&
+    environment !== "sandcastle"
+  ) {
+    throw new Error(`${field} must be none, docker, podman, or vercel`);
+  }
+  return environment === "sandcastle" ? "docker" : environment;
+}
+
+function parseDurationSeconds(value: unknown, field: string): number {
+  if (typeof value === "number") {
+    return requiredPositiveDurationSeconds(value, field);
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${field} must be a positive duration`);
+  }
+  const trimmed = value.trim().toLowerCase();
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) {
+    return requiredPositiveDurationSeconds(numeric, field);
+  }
+  const match = trimmed.match(
+    /^(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours)$/,
+  );
+  if (!match) {
+    throw new Error(`${field} must be a positive duration like 300, "300s", or "5m"`);
+  }
+  const amount = Number(match[1]);
+  const unit = match[2];
+  const multiplier = unit.startsWith("h") ? 3600 : unit.startsWith("m") ? 60 : 1;
+  return requiredPositiveDurationSeconds(amount * multiplier, field);
+}
+
+function parseDurationMinutes(value: unknown, field: string): number {
+  const minutes = Number(value);
+  if (!Number.isFinite(minutes)) {
+    throw new Error(`${field} must be a positive number of minutes`);
+  }
+  return requiredPositiveDurationSeconds(minutes * 60, field);
+}
+
+function requiredPositiveDurationSeconds(value: unknown, field: string): number {
+  const seconds = Math.ceil(Number(value));
+  if (!Number.isFinite(seconds) || seconds < 1) {
+    throw new Error(`${field} must be at least 1 second`);
+  }
+  return seconds;
 }
 
 function normalizeMetricContract(contract: any): any {
