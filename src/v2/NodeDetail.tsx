@@ -8,6 +8,7 @@ import {
   isImprovement,
   topObjectiveMetric,
 } from "./format";
+import { experimentSourceLabel, experimentSources } from "./sources";
 
 type Props = {
   experiment: any;
@@ -43,6 +44,7 @@ export function NodeDetail({
   const status = String(experiment.status ?? "");
   const failureReason =
     status === "failed" && !isRolledBack ? String(experiment.failureReason ?? "").trim() : "";
+  const sources = experimentSources(experiment.sources);
 
   const metricEntries = Object.entries(experiment.metrics ?? {}).sort(
     ([a], [b]) =>
@@ -71,6 +73,33 @@ export function NodeDetail({
         </header>
 
         <div className="sheet-body">
+          {sources.length > 0 ? (
+            <div className="sheet-section">
+              <h4>sources</h4>
+              <div className="source-list">
+                {sources.map((source, index) => {
+                  const label = experimentSourceLabel(source);
+                  const citation = source.citation && source.citation !== label
+                    ? source.citation
+                    : undefined;
+                  return (
+                    <div className="source-item" key={`${source.url ?? source.citation}-${index}`}>
+                      {source.kind ? <span className="source-kind">{source.kind}</span> : null}
+                      {source.url ? (
+                        <a href={source.url} target="_blank" rel="noreferrer">
+                          {label}
+                        </a>
+                      ) : (
+                        <span className="source-text">{source.citation ?? label}</span>
+                      )}
+                      {citation ? <span className="source-citation">{citation}</span> : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
           {failureReason ? (
             <div className="sheet-section">
               <h4>failure</h4>

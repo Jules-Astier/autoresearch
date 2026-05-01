@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { hostSessionStore } from "@ai-hero/sandcastle";
 import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api.js";
 import {
@@ -71,8 +72,10 @@ async function runPlanningCycle(client, claim, args) {
   const memorySnapshot = readMemorySnapshot(repoPath, session.memory);
   const researcherOutput = shouldRunResearcher(session)
     ? await runOrchestratorAgent({
+        client,
         role: "researcher",
         session,
+        planningCycleId,
         cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
         outputPath: path.join(cycleDir, "researcher-final.md"),
         prompt: buildResearcherPrompt({ session, experiments, patches, requestedCount, memorySnapshot }),
@@ -80,6 +83,12 @@ async function runPlanningCycle(client, claim, args) {
         dryRunOutput: { candidates: [], rejected: [] }
       })
     : "";
+  if (researcherOutput) {
+    await client.mutation(api.orchestration.recordPlanningCycleResearcherOutput, {
+      planningCycleId,
+      researcherOutput
+    });
+  }
   const research = researcherOutput ? parseJsonObject(researcherOutput, "researcher") : null;
 
   const plannerPrompt = buildPlannerPrompt({
@@ -91,8 +100,10 @@ async function runPlanningCycle(client, claim, args) {
     research
   });
   const plannerOutput = await runOrchestratorAgent({
+    client,
     role: "planner",
     session,
+    planningCycleId,
     cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
     outputPath: path.join(cycleDir, "planner-final.md"),
     prompt: plannerPrompt,
@@ -110,8 +121,10 @@ async function runPlanningCycle(client, claim, args) {
     research
   });
   const reviewerOutput = await runOrchestratorAgent({
+    client,
     role: "reviewer",
     session,
+    planningCycleId,
     cwd: fs.existsSync(repoPath) ? repoPath : ROOT,
     outputPath: path.join(cycleDir, "reviewer-final.md"),
     prompt: reviewerPrompt,
@@ -119,7 +132,7 @@ async function runPlanningCycle(client, claim, args) {
     dryRunOutput: dryRunReview()
   });
   const review = parseJsonObject(reviewerOutput, "reviewer");
-  const approved = normalizeApprovedExperiments(review, plan, requestedCount);
+  const approved = normalizeApprovedExperiments(review, plan, requestedCount, research);
 
   if (approved.length === 0) {
     throw new Error("reviewer approved no experiments");
@@ -176,9 +189,9 @@ Rules:
 - Read the configured memory and reference paths when they exist.
 - Do not edit files, run benchmarks, or claim a result is a win without benchmark evidence.
 - Translate references into clean single-change hypotheses that fit editable paths.
-- For architecture_change candidates, write the worker prompt so the worker directly uses ${MODEL_DIAGRAM_SKILL_NAME}, reads ${MODEL_DIAGRAM_SKILL_PATH}, and creates or updates only an editable TikZ `.tex` model diagram source for the diagram artifact.
+- For architecture_change candidates, write the worker prompt so the worker directly uses ${MODEL_DIAGRAM_SKILL_NAME}, reads ${MODEL_DIAGRAM_SKILL_PATH}, and creates or updates only an editable TikZ \`.tex\` model diagram source for the diagram artifact.
 - If no diagram source exists yet for an architecture_change, tell the worker to create one, preferably ${DEFAULT_MODEL_DIAGRAM_SOURCE} when that path is editable.
-- Tell the worker not to compile, render, or create PDF/PNG diagram files; the local runner processes the accepted `.tex` source into PNG.
+- Tell the worker not to compile, render, or create PDF/PNG diagram files; the local runner processes the accepted \`.tex\` source into PNG.
 - Reject ideas already present in current code, prior experiments, or do-not-repeat guidance.
 - Prefer concrete follow-ups over broad research themes.
 ${memory?.researcher?.instructions ? `\nAdditional researcher instructions:\n${memory.researcher.instructions}` : ""}
@@ -192,7 +205,14 @@ Return only JSON:
       "prompt": "smallest credible worker instruction",
       "rationale": "why this maps to the current target repo",
       "risk": "main failure mode",
-      "source": "paper, reference path, or memory source"
+      "sources": [
+        {
+          "title": "paper, reference path, memory note, or URL title",
+          "url": "required for arXiv, DOI, or web sources",
+          "kind": "paper | reference_path | memory | url",
+          "citation": "short citation or local path excerpt"
+        }
+      ]
     }
   ],
   "rejected": [
@@ -248,9 +268,11 @@ Rules:
 - Avoid duplicate or stale hypotheses.
 - Use durable memory and researcher candidates to avoid repeats and stale ideas.
 - Each experiment must be one coherent change.
-- For architecture_change experiments, include worker instructions to use ${MODEL_DIAGRAM_SKILL_NAME}, read ${MODEL_DIAGRAM_SKILL_PATH}, and create or update only an editable TikZ `.tex` model diagram source for the diagram artifact.
+- If an experiment derives from a researcher candidate, carry forward its sources.
+- Do not invent source URLs; only emit a source URL if it appears verbatim in the Researcher candidates JSON.
+- For architecture_change experiments, include worker instructions to use ${MODEL_DIAGRAM_SKILL_NAME}, read ${MODEL_DIAGRAM_SKILL_PATH}, and create or update only an editable TikZ \`.tex\` model diagram source for the diagram artifact.
 - If an architecture_change has no existing diagram source, tell the worker to create one, preferably ${DEFAULT_MODEL_DIAGRAM_SOURCE} when that path is editable.
-- Tell the worker not to compile, render, or create PDF/PNG diagram files; the local runner processes the accepted `.tex` source into PNG.
+- Tell the worker not to compile, render, or create PDF/PNG diagram files; the local runner processes the accepted \`.tex\` source into PNG.
 - Do not change data, benchmark command, metric parsing, immutable files, target definitions, credentials, or deployment behavior.
 
 Return only JSON:
@@ -261,7 +283,10 @@ Return only JSON:
       "changeKind": "architecture_change or config_change",
       "prompt": "worker-specific instructions including exact files/surfaces to edit",
       "expectedImpact": "why this may improve the metric",
-      "independenceReason": "why it can run in parallel with the others"
+      "independenceReason": "why it can run in parallel with the others",
+      "sources": [
+        { "title": "optional", "url": "optional", "kind": "paper | reference_path | memory | url", "citation": "optional" }
+      ]
     }
   ]
 }`;
@@ -293,8 +318,9 @@ Planner proposal:
 ${JSON.stringify(plan, null, 2)}
 
 Rules:
-- Reject architecture_change proposals whose worker prompt does not require ${MODEL_DIAGRAM_SKILL_NAME} and creation or update of only an editable TikZ `.tex` model diagram source for the diagram artifact.
-- Reject architecture_change proposals that need a new diagram source but do not name an editable `.tex` path such as ${DEFAULT_MODEL_DIAGRAM_SOURCE}.
+- Preserve sources from the planner proposal on approved experiments.
+- Reject architecture_change proposals whose worker prompt does not require ${MODEL_DIAGRAM_SKILL_NAME} and creation or update of only an editable TikZ \`.tex\` model diagram source for the diagram artifact.
+- Reject architecture_change proposals that need a new diagram source but do not name an editable \`.tex\` path such as ${DEFAULT_MODEL_DIAGRAM_SOURCE}.
 - Reject architecture_change proposals that ask the worker to compile, render, or create PDF/PNG diagram files.
 
 Return only JSON:
@@ -303,7 +329,10 @@ Return only JSON:
     {
       "hypothesis": "approved hypothesis",
       "changeKind": "architecture_change or config_change",
-      "prompt": "worker-specific instructions"
+      "prompt": "worker-specific instructions",
+      "sources": [
+        { "title": "optional", "url": "optional", "kind": "paper | reference_path | memory | url", "citation": "optional" }
+      ]
     }
   ],
   "rejected": [
@@ -312,7 +341,7 @@ Return only JSON:
 }`;
 }
 
-async function runOrchestratorAgent({ role, session, cwd, outputPath, prompt, args, dryRunOutput }) {
+async function runOrchestratorAgent({ client, role, session, planningCycleId, cwd, outputPath, prompt, args, dryRunOutput }) {
   if (args.dryRun) {
     return JSON.stringify(dryRunOutput ?? dryRunPlan(1));
   }
@@ -334,6 +363,15 @@ async function runOrchestratorAgent({ role, session, cwd, outputPath, prompt, ar
   });
   const final = result.result || result.stdout || "";
   fs.writeFileSync(outputPath, final, "utf8");
+  await recordAgentUsage(client, {
+    sessionId: session._id,
+    planningCycleId,
+    role,
+    source: role,
+    provider: config.agentProvider,
+    model: config.model,
+    usage: result.usage
+  });
   if (result.code !== 0) {
     throw new Error(`${role} ${config.agentProvider} exited ${result.code}: ${(result.stderr || final).slice(-2000)}`);
   }
@@ -402,20 +440,80 @@ function dryRunReview() {
   };
 }
 
-function normalizeApprovedExperiments(review, plan, requestedCount) {
+function normalizeApprovedExperiments(review, plan, requestedCount, research) {
   const source = Array.isArray(review.approvedExperiments)
     ? review.approvedExperiments
     : Array.isArray(plan.experiments)
       ? plan.experiments
       : [];
+  const planExperiments = Array.isArray(plan.experiments) ? plan.experiments : [];
+  const planByHypothesis = new Map(
+    planExperiments.map((item) => [String(item.hypothesis || "").trim(), item])
+  );
+  const allowedSourceUrls = collectResearchSourceUrls(research);
   return source
     .slice(0, requestedCount)
-    .map((item) => ({
-      hypothesis: String(item.hypothesis || "").trim(),
-      changeKind: normalizeChangeKind(item.changeKind || item.change_kind),
-      prompt: String(item.prompt || item.workerPrompt || item.instructions || "").trim()
-    }))
+    .map((item, index) => {
+      const hypothesis = String(item.hypothesis || "").trim();
+      const fallbackPlan = planByHypothesis.get(hypothesis) ?? planExperiments[index];
+      const sources = normalizeExperimentSources(
+        item.sources ?? item.source ?? fallbackPlan?.sources ?? fallbackPlan?.source,
+        allowedSourceUrls
+      );
+      const normalized = {
+        hypothesis,
+        changeKind: normalizeChangeKind(item.changeKind || item.change_kind),
+        prompt: String(item.prompt || item.workerPrompt || item.instructions || "").trim()
+      };
+      if (sources.length > 0) {
+        normalized.sources = sources;
+      }
+      return normalized;
+    })
     .filter((item) => item.hypothesis && item.prompt);
+}
+
+function normalizeExperimentSources(value, allowedSourceUrls) {
+  const sourceItems = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? [{ citation: value }]
+      : [];
+  const normalized = [];
+  for (const item of sourceItems) {
+    const source = typeof item === "string" ? { citation: item } : item;
+    if (!isPlainObject(source)) continue;
+    const title = trimString(source.title);
+    const url = trimString(source.url);
+    const kind = trimString(source.kind);
+    const citation = trimString(source.citation);
+    if (url && !allowedSourceUrls.has(url)) continue;
+    if (!url && !citation) continue;
+    const entry = {};
+    if (title) entry.title = title;
+    if (url) entry.url = url;
+    if (kind) entry.kind = kind;
+    if (citation) entry.citation = citation;
+    normalized.push(entry);
+  }
+  return normalized;
+}
+
+function collectResearchSourceUrls(research) {
+  const urls = new Set();
+  const candidates = Array.isArray(research?.candidates) ? research.candidates : [];
+  for (const candidate of candidates) {
+    const sources = Array.isArray(candidate?.sources) ? candidate.sources : [];
+    for (const source of sources) {
+      const url = isPlainObject(source) ? trimString(source.url) : "";
+      if (url) urls.add(url);
+    }
+  }
+  return urls;
+}
+
+function trimString(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function normalizeChangeKind(value) {
@@ -444,6 +542,9 @@ function shouldRunResearcher(session) {
 }
 
 function normalizeMemoryConfig(value) {
+  if (value === undefined || value === null) {
+    value = {};
+  }
   if (!isPlainObject(value) || value.enabled === false) {
     return null;
   }
@@ -616,9 +717,13 @@ function runAgentProviderCommand({ role, cwd, command, input, env, provider }) {
     let stdout = "";
     let stderr = "";
     let result = "";
+    let sessionId;
     let stdoutLineBuffer = "";
+    const usageSnapshots = [];
 
     const emitParsedLine = (line) => {
+      const usage = parseUsageFromJsonLine(line);
+      if (usage) usageSnapshots.push(usage);
       const parsed = provider.parseStreamLine(line);
       if (parsed.length === 0) {
         if (line.trim()) process.stdout.write(`${line}\n`);
@@ -631,6 +736,8 @@ function runAgentProviderCommand({ role, cwd, command, input, env, provider }) {
           result = event.result;
         } else if (event.type === "tool_call") {
           process.stdout.write(`[${role} tool:${event.name}] ${event.args}\n`);
+        } else if (event.type === "session_id") {
+          sessionId = event.sessionId;
         }
       }
     };
@@ -653,17 +760,124 @@ function runAgentProviderCommand({ role, cwd, command, input, env, provider }) {
     child.on("error", (error) => {
       stderr += String(error);
     });
-    child.on("close", (code) => {
+    child.on("close", async (code) => {
       if (stdoutLineBuffer) {
         emitParsedLine(stdoutLineBuffer);
       }
-      resolve({ code: code ?? 1, stdout, stderr, result });
+      const sessionUsage = await readProviderSessionUsage({ provider, cwd, sessionId });
+      resolve({
+        code: code ?? 1,
+        stdout,
+        stderr,
+        result,
+        usage: combineUsage([...usageSnapshots, sessionUsage])
+      });
     });
     if (input) {
       child.stdin.write(input);
     }
     child.stdin.end();
   });
+}
+
+async function readProviderSessionUsage({ provider, cwd, sessionId }) {
+  if (!provider.captureSessions || !provider.parseSessionUsage || !sessionId) {
+    return null;
+  }
+  try {
+    const content = await hostSessionStore(cwd).readSession(sessionId);
+    return provider.parseSessionUsage(content) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function recordAgentUsage(client, {
+  sessionId,
+  planningCycleId,
+  role,
+  source,
+  provider,
+  model,
+  usage
+}) {
+  if (!usage) return;
+  await client.mutation(api.orchestration.recordAgentUsage, {
+    ...definedFields({
+      sessionId,
+      planningCycleId,
+      role,
+      source,
+      provider,
+      model
+    }),
+    ...definedFields(usage)
+  });
+}
+
+function combineUsage(items) {
+  const normalized = items.map(normalizeUsage).filter(Boolean);
+  if (normalized.length === 0) return null;
+  return normalized.reduce((total, usage) => ({
+    inputTokens: addOptional(total.inputTokens, usage.inputTokens),
+    cacheCreationInputTokens: addOptional(total.cacheCreationInputTokens, usage.cacheCreationInputTokens),
+    cacheReadInputTokens: addOptional(total.cacheReadInputTokens, usage.cacheReadInputTokens),
+    outputTokens: addOptional(total.outputTokens, usage.outputTokens),
+    totalTokens: addOptional(total.totalTokens, usage.totalTokens),
+    rawUsage: [...(total.rawUsage ?? []), usage.rawUsage ?? usage]
+  }), {});
+}
+
+function normalizeUsage(value) {
+  if (!isPlainObject(value)) return null;
+  const raw = isPlainObject(value.usage) ? value.usage : value;
+  const inputTokens = numberOption(raw.inputTokens, raw.input_tokens, raw.promptTokens, raw.prompt_tokens);
+  const cacheCreationInputTokens = numberOption(raw.cacheCreationInputTokens, raw.cache_creation_input_tokens);
+  const cacheReadInputTokens = numberOption(raw.cacheReadInputTokens, raw.cache_read_input_tokens);
+  const outputTokens = numberOption(raw.outputTokens, raw.output_tokens, raw.completionTokens, raw.completion_tokens);
+  const totalTokens = numberOption(raw.totalTokens, raw.total_tokens);
+  if ([inputTokens, cacheCreationInputTokens, cacheReadInputTokens, outputTokens, totalTokens].every((item) => item === undefined)) {
+    return null;
+  }
+  return { inputTokens, cacheCreationInputTokens, cacheReadInputTokens, outputTokens, totalTokens, rawUsage: raw };
+}
+
+function parseUsageFromJsonLine(line) {
+  if (!line.startsWith("{")) return null;
+  try {
+    return findUsageObject(JSON.parse(line));
+  } catch {
+    return null;
+  }
+}
+
+function findUsageObject(value) {
+  if (!isPlainObject(value)) return null;
+  if (normalizeUsage(value)) return value;
+  for (const key of ["usage", "token_usage", "tokenUsage", "response", "message", "item"]) {
+    const found = findUsageObject(value[key]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function numberOption(...values) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+function addOptional(a, b) {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return a + b;
+}
+
+function definedFields(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined)
+  );
 }
 
 function parseArgs(argv) {

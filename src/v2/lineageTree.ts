@@ -6,6 +6,8 @@
 // of dead branches — each rooted at the rollback target experiment, holding
 // the experiments that were pruned by that rollback.
 
+import type { ExperimentSource } from "./sources";
+
 export type ExperimentLite = {
   _id: string;
   ordinal: number;
@@ -16,6 +18,7 @@ export type ExperimentLite = {
   score?: number;
   createdAtUtc?: string;
   activeRunId?: string;
+  sources?: ExperimentSource[];
 };
 
 export type RollbackLite = {

@@ -24,6 +24,10 @@ async function main() {
     await runScript("dev-stack.mjs", argv);
     return;
   }
+  if (command === "run") {
+    await runSession(argv);
+    return;
+  }
   if (command === "session" || command === "sessions") {
     await runSessionCommand(argv);
     return;
@@ -152,7 +156,7 @@ function initReadmeContent(projectName) {
     "## Session Setup",
     "",
     "1. Copy `sessions/example` to `sessions/<slug>`.",
-    "2. Edit `sessions/<slug>/session.json` so `benchmarkCommand`, path globs, budgets, agent settings, and metric names match this repository.",
+    "2. Edit `sessions/<slug>/session.json` so `benchmarkCommand`, path globs, budgets, workspace links, agent settings, and metric names match this repository.",
     "3. Replace `goal.md` with the session objective, out-of-scope changes, and success criteria.",
     "4. Replace `metric_contract.md` with the exact benchmark output contract and objective priority.",
     "5. Add notes under `context/`, `references/`, or `baselines/` only when they help agents make better bounded changes.",
@@ -173,6 +177,7 @@ function initReadmeContent(projectName) {
     "",
     "- `repoPath` points from the session directory back to this repository. For `sessions/<slug>`, that is usually `../../..`.",
     "- `editablePaths`, `immutablePaths`, and `runtimeConfigPaths` are relative to the repository root, not the session directory.",
+    "- Configure `workspaceLinks` for large read-only generated inputs, such as prepared datasets, so long sessions do not duplicate them per run.",
     "- `metricContract.metrics` is ordered by priority when `rankingMode` is `lexicographic`.",
     "- Secrets stay out of session files. Put only environment variable names in `agent.envVars`, `sandbox.envVars`, or `.env.example`.",
     "- The benchmark must print either a final JSON object or `metric_name: 1.23` lines."
@@ -190,6 +195,7 @@ function initAgentsContent() {
     "- Keep `session.json` valid JSON. Do not add comments or trailing commas.",
     "- Keep `repoPath` relative from the session directory to the repository root when possible. For `.autoresearch/sessions/<slug>`, use `../../..`.",
     "- Use repository-relative globs for `editablePaths`, `immutablePaths`, and `runtimeConfigPaths`.",
+    "- Set `workspaceLinks` for large read-only generated inputs and include the linked workspace paths in `immutablePaths`.",
     "- Do not put secrets, credentials, tokens, or host-specific absolute paths in committed session files.",
     "- Update `goal.md` and `metric_contract.md` whenever the session contract changes.",
     "- Do not invent benchmark metrics. If the benchmark output is unknown, document the blocker in `metric_contract.md`.",
@@ -232,6 +238,7 @@ function exampleSessionContract(projectName, repoPath) {
     editablePaths: ["src/**", "config/**"],
     immutablePaths: ["data/**", "package-lock.json"],
     runtimeConfigPaths: ["package.json", "config/**"],
+    workspaceLinks: [],
     modelIoContract: "Preserve public inputs, outputs, benchmark command, and metric JSON shape.",
     agent: {
       provider: "codex",
@@ -433,6 +440,169 @@ async function registerSession(argv) {
   console.log(`Session id: ${sessionId}`);
 }
 
+async function runSession(argv) {
+  const args = parseArgs(argv);
+  if (args.help || args.h) {
+    printRunHelp();
+    return;
+  }
+  const sessionDirArg = args._[0];
+  if (!sessionDirArg || args._.length > 1) {
+    throw new Error("Usage: autoresearch run <session-dir> [run options]");
+  }
+
+  const { sessionDir, payload } = loadSessionPayload(sessionDirArg);
+  const runners = nonNegativeIntegerArg(args, "runners", payload.maxConcurrentRuns || 1);
+  const planners = positiveIntegerArg(
+    args,
+    "planners",
+    payload.maxPlannedConcurrentExperiments || 3
+  );
+
+  if (args.dryRun) {
+    console.log(JSON.stringify({ sessionDir, session: payload, runners, planners }, null, 2));
+    return;
+  }
+
+  if (args.stack === false || args.noStack) {
+    const convexUrl = resolveConvexUrl(args);
+    const sessionId = await registerAndStartSession({ payload, convexUrl, runners, planners });
+    console.log(`Running ${payload.slug} at ${convexUrl}`);
+    console.log(`Session id: ${sessionId}`);
+    console.log(`Desired runners: ${runners}`);
+    console.log(`Planner batch size: ${planners}`);
+    return;
+  }
+
+  await runStackAndSession({ args, payload, runners, planners });
+}
+
+function loadSessionPayload(sessionDirArg) {
+  const sessionDir = path.resolve(process.cwd(), sessionDirArg);
+  const contractPath = path.join(sessionDir, "session.json");
+  if (!fs.existsSync(contractPath)) {
+    throw new Error(`Missing session.json: ${contractPath}`);
+  }
+  const contract = JSON.parse(fs.readFileSync(contractPath, "utf8"));
+  return { sessionDir, payload: normalizeSessionContract(contract, sessionDir) };
+}
+
+async function registerAndStartSession({ payload, convexUrl, runners, planners }) {
+  const client = new ConvexHttpClient(convexUrl);
+  const sessionId = await client.mutation(api.orchestration.registerResearchSession, payload);
+  await Promise.all([
+    client.mutation(api.orchestration.resumeSession, {
+      sessionId,
+      targetExperimentCount: payload.targetExperimentCount
+    }),
+    client.mutation(api.orchestration.setSessionConcurrency, {
+      sessionId,
+      maxConcurrentRuns: Math.max(1, runners),
+      maxPlannedConcurrentExperiments: planners
+    }),
+    client.mutation(api.orchestration.setWorkerControl, {
+      desiredRunnerCount: runners,
+      desiredPlannerCount: planners
+    })
+  ]);
+  return sessionId;
+}
+
+async function runStackAndSession({ args, payload, runners, planners }) {
+  const stackArgs = [];
+  if (args.convexUrl) stackArgs.push("--convex-url", String(args.convexUrl));
+  if (args.frontendPort) stackArgs.push("--frontend-port", String(args.frontendPort));
+  if (args.port && !args.frontendPort) stackArgs.push("--frontend-port", String(args.port));
+  if (args.noReuse) stackArgs.push("--no-reuse");
+  if (args.noWorkers) stackArgs.push("--no-workers");
+  if (args.workerPollMs) stackArgs.push("--worker-poll-ms", String(args.workerPollMs));
+
+  await new Promise((resolve, reject) => {
+    let registered = false;
+    let settled = false;
+    const child = spawn(process.execPath, [path.join(ROOT, "scripts", "dev-stack.mjs"), ...stackArgs], {
+      cwd: ROOT,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve();
+    };
+    const stop = () => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGINT");
+      }
+    };
+
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    child.once("error", finish);
+    child.once("exit", (code) => {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+      if (code === 0 || code === null) finish();
+      else finish(new Error(`dev-stack.mjs exited with ${code}`));
+    });
+
+    const onLine = (line) => {
+      const match = line.match(/Convex backend:\s+(https?:\/\/\S+)/u);
+      if (!match || registered) return;
+      registered = true;
+      void registerAndStartSession({
+        payload,
+        convexUrl: match[1],
+        runners,
+        planners
+      })
+        .then((sessionId) => {
+          console.log("");
+          console.log(`Running ${payload.slug}`);
+          console.log(`  Session id: ${sessionId}`);
+          console.log(`  Desired runners: ${runners}`);
+          console.log(`  Planner batch size: ${planners}`);
+          console.log("");
+        })
+        .catch((error) => {
+          stop();
+          finish(error);
+        });
+    };
+
+    pipeLines(child.stdout, process.stdout, onLine);
+    pipeLines(child.stderr, process.stderr, onLine);
+  });
+}
+
+function pipeLines(input, output, onLine) {
+  let buffer = "";
+  input.on("data", (chunk) => {
+    const text = chunk.toString();
+    output.write(text);
+    buffer += text;
+    const lines = buffer.split(/\r?\n/u);
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      onLine(line);
+    }
+  });
+}
+
+function resolveConvexUrl(args) {
+  const convexUrl =
+    args.convexUrl ??
+    process.env.CONVEX_URL ??
+    process.env.VITE_CONVEX_URL ??
+    loadEnvFile(path.join(ROOT, ".env.local")).VITE_CONVEX_URL;
+  if (!convexUrl) {
+    throw new Error("Missing Convex URL. Run `autoresearch dev`, pass --convex-url, or omit --no-stack.");
+  }
+  return convexUrl;
+}
+
 function printSessionGuide(argv) {
   const args = parseArgs(argv);
   if (args.help || args.h) {
@@ -470,6 +640,7 @@ function printSessionGuide(argv) {
     editablePaths: csvArg(args, "editablePaths", ["src/**", "config/**", "figures/**/*.tex"]),
     immutablePaths: csvArg(args, "immutablePaths", ["data/**", "figures/**/*.pdf", "figures/**/*.png"]),
     runtimeConfigPaths: csvArg(args, "runtimeConfigPaths", ["config/**"]),
+    workspaceLinks: [],
     modelIoContract: "Preserve public inputs, outputs, and metric JSON shape.",
     agent: {
       provider: stringArg(args, "agentProvider", "codex"),
@@ -519,6 +690,7 @@ ${JSON.stringify(contract, null, 2)}
    editablePaths: repo-relative files or globs workers may change.
    immutablePaths: repo-relative files or globs workers must not change.
    runtimeConfigPaths: repo-relative config files planners should inspect.
+   workspaceLinks: important for large read-only generated inputs; link shared prepared datasets or cached features instead of copying them into every run workspace.
    metricContract.metrics: ordered objectives; constraints may include role "constraint".
 
 4. Validate without touching Convex:
@@ -570,6 +742,7 @@ function normalizeSessionContract(contract, sessionDir) {
     editablePaths: requiredStringArray(contract.editablePaths, "editablePaths"),
     immutablePaths: stringArray(contract.immutablePaths, "immutablePaths"),
     runtimeConfigPaths: stringArray(contract.runtimeConfigPaths, "runtimeConfigPaths"),
+    workspaceLinks: normalizeWorkspaceLinks(contract.workspaceLinks, sessionDir),
     modelIoContract: optionalString(contract.modelIoContract),
     agent: normalizeAgentConfig(contract.agent),
     memory: normalizeMemoryConfig(contract.memory),
@@ -577,6 +750,28 @@ function normalizeSessionContract(contract, sessionDir) {
     sandbox: normalizeSandboxConfig(contract.sandbox),
     earlyStopping: contract.earlyStopping
   };
+}
+
+function normalizeWorkspaceLinks(value, sessionDir) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error("workspaceLinks must be an array when provided");
+  }
+  return value.map((item, index) => {
+    if (!isPlainObject(item)) {
+      throw new Error(`workspaceLinks[${index}] must be an object`);
+    }
+    return {
+      workspacePath: normalizeRelativeConfigPath(
+        item.workspacePath,
+        `workspaceLinks[${index}].workspacePath`
+      ),
+      targetPath: resolveContractPath(
+        requiredString(item.targetPath, `workspaceLinks[${index}].targetPath`),
+        sessionDir
+      )
+    };
+  });
 }
 
 function normalizeMetricContract(contract) {
@@ -777,7 +972,9 @@ function normalizeComputeBudgetConfig(value) {
 }
 
 function normalizeMemoryConfig(value) {
-  if (value === undefined || value === null) return undefined;
+  if (value === undefined || value === null) {
+    return normalizeMemoryConfig({});
+  }
   if (typeof value === "boolean") {
     return normalizeMemoryConfig({ enabled: value });
   }
@@ -1254,12 +1451,32 @@ function printHelp() {
   console.log(`Usage:
   autoresearch init [project-dir] [--force]
   autoresearch dev
+  autoresearch run <session-dir> [run options]
   autoresearch session guide [session-dir] [guide options]
   autoresearch session add <session-dir> [--convex-url URL] [--dry-run]
   autoresearch doctor
   autoresearch install-tex --macos
   autoresearch runner [runner options]
   autoresearch orchestrator [orchestrator options]`);
+}
+
+function printRunHelp() {
+  console.log(`Usage:
+  autoresearch run <session-dir> [run options]
+
+Starts the local stack, registers or updates the session, resumes it, and sets
+worker control so runners begin consuming queued experiments.
+
+Run options:
+  --runners N          Desired local runner count. Defaults to session maxConcurrentRuns or 1.
+  --planners N         Planner batch size. Defaults to session maxPlannedConcurrentExperiments or 3.
+  --convex-url URL     Convex deployment URL. Also passed to the local stack.
+  --frontend-port N    Frontend port for the local stack.
+  --no-stack           Do not start the local stack; use an existing Convex backend.
+  --no-reuse           Force the local stack to start a fresh Convex process.
+  --no-workers         Start the stack without its worker supervisor.
+  --worker-poll-ms N   Worker supervisor polling interval.
+  --dry-run            Print the resolved run payload without contacting Convex.`);
 }
 
 function printInitHelp() {

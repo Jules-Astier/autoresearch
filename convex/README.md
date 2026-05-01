@@ -53,6 +53,11 @@ External projects register sessions through
 normalizes relative `repoPath` values to absolute paths, and sends the session
 contract to that mutation.
 
+Long-running sessions should set `workspaceLinks` for large read-only generated
+inputs, such as prepared datasets. The runner creates these symlinks inside each
+workspace before the worker and benchmark run, avoiding one copy per experiment
+under `~/.autoresearch/runner`.
+
 `researchWorkerControls` stores fallback desired local runner and planner
 counts. Session contracts can override planner batch size with
 `maxPlannedConcurrentExperiments`; the browser writes the selected session value

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
+import { Trash2 } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { Header } from "./Header";
 import { SessionTape } from "./SessionTape";
@@ -8,11 +9,13 @@ import { HypothesisNow } from "./HypothesisNow";
 import { Lineage } from "./Lineage";
 import { Ledger } from "./Ledger";
 import { LiveTape } from "./LiveTape";
-import { AgentDialogue } from "./AgentDialogue";
+import { AgentsPanel } from "./AgentsPanel";
+import { NotesPanel } from "./NotesPanel";
 import { NodeDetail } from "./NodeDetail";
 import { DiffSheet } from "./DiffSheet";
 import { Toolbar } from "./Toolbar";
 import { NewSessionDialog, type NewSessionPayload } from "./NewSessionDialog";
+import { RemoveSessionDialog } from "./RemoveSessionDialog";
 import { buildLineage, type ExperimentLite, type RollbackLite } from "./lineageTree";
 import "./lab.css";
 
@@ -27,16 +30,28 @@ export function LabLedger() {
   const requestMore = useMutation(api.orchestration.requestMoreExperiments);
   const setSessionConcurrency = useMutation(api.orchestration.setSessionConcurrency);
   const setWorkerControl = useMutation(api.orchestration.setWorkerControl);
+  const updateSessionContract = useMutation(api.orchestration.updateResearchSessionContract);
   const registerSession = useMutation(api.orchestration.registerResearchSession);
+  const removeSession = useMutation(api.orchestration.removeResearchSession);
 
   const [selectedSessionId, setSelectedSessionId] = useState<string>();
   const [selectedExperimentId, setSelectedExperimentId] = useState<string | undefined>();
   const [diffPatchId, setDiffPatchId] = useState<string | undefined>();
   const [isNewSessionOpen, setIsNewSessionOpen] = useState(false);
+  const [isRemoveSessionOpen, setIsRemoveSessionOpen] = useState(false);
 
   useEffect(() => {
     if (!selectedSessionId && sessions && sessions.length > 0) {
       setSelectedSessionId(sessions[0]._id);
+    }
+  }, [sessions, selectedSessionId]);
+
+  useEffect(() => {
+    if (!selectedSessionId || !sessions || sessions.length === 0) return;
+    if (!sessions.some((candidate) => candidate._id === selectedSessionId)) {
+      setSelectedSessionId(sessions[0]._id);
+      setSelectedExperimentId(undefined);
+      setDiffPatchId(undefined);
     }
   }, [sessions, selectedSessionId]);
 
@@ -52,7 +67,9 @@ export function LabLedger() {
   const patches = detail?.patches ?? [];
   const artifacts = detail?.artifacts ?? [];
   const messages = detail?.messages ?? [];
+  const agentUsageSummary = detail?.agentUsageSummary;
   const planningCycles = detail?.planningCycles ?? [];
+  const memoryNotes = detail?.memoryNotes ?? [];
   const activeLogs = detail?.activeLogs ?? [];
   const activeRun = detail?.activeRun ?? null;
   const activePlanningCycle = planningCycles.find((cycle: any) => cycle.status === "running");
@@ -143,6 +160,38 @@ export function LabLedger() {
                     maxPlannedConcurrentExperiments: count,
                   });
                 }}
+                onSetComputeBudgetSeconds={(seconds) => {
+                  void updateSessionContract({
+                    sessionId: session._id,
+                    computeBudget: { ...(session.computeBudget ?? {}), seconds },
+                  });
+                }}
+                onSetResearcherEnabled={(enabled) => {
+                  void updateSessionContract({
+                    sessionId: session._id,
+                    memory: {
+                      ...(session.memory ?? {}),
+                      enabled: true,
+                      researcher: {
+                        ...(session.memory?.researcher ?? {}),
+                        enabled,
+                      },
+                    },
+                  });
+                }}
+                onSetMemoryKeeperEnabled={(enabled) => {
+                  void updateSessionContract({
+                    sessionId: session._id,
+                    memory: {
+                      ...(session.memory ?? {}),
+                      enabled: true,
+                      memoryKeeper: {
+                        ...(session.memory?.memoryKeeper ?? {}),
+                        enabled,
+                      },
+                    },
+                  });
+                }}
               />
 
               <Frontier
@@ -183,11 +232,54 @@ export function LabLedger() {
                   bestMetrics={session.bestMetrics}
                 />
               </section>
+
+              <section className="section">
+                <div className="section-head">
+                  <h2 className="section-title">notes</h2>
+                  <span className="section-aside">
+                    {memoryNotes.length} item{memoryNotes.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <NotesPanel notes={memoryNotes} memoryConfig={session.memory} />
+              </section>
+
+              <section className="section danger-zone" aria-label="Session removal">
+                <div>
+                  <h2 className="section-title">session removal</h2>
+                  <p>
+                    Remove this session and its recorded experiments from the ledger.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-warn"
+                  onClick={() => setIsRemoveSessionOpen(true)}
+                >
+                  <Trash2 size={13} />
+                  remove session
+                </button>
+              </section>
             </main>
 
             <aside className="rail">
               <LiveTape logs={activeLogs} activeRun={activeRun} />
-              <AgentDialogue messages={messages} />
+              <div className="rail-card">
+                <div className="rail-head">
+                  <span className="rail-title">agents</span>
+                  <span className="rail-meta">
+                    {planningCycles.length} cycles · {messages.length} messages
+                  </span>
+                </div>
+                <AgentsPanel
+                  session={session}
+                  planningCycles={planningCycles}
+                  messages={messages}
+                  agentUsageSummary={agentUsageSummary}
+                  activeRun={activeRun}
+                  activeExperiment={activeExperiment}
+                  workerControl={workerControl}
+                />
+              </div>
             </aside>
           </div>
         )}
@@ -226,6 +318,20 @@ export function LabLedger() {
           onCreate={async (payload: NewSessionPayload) => {
             const sessionId = await registerSession(payload as any);
             setSelectedSessionId(String(sessionId));
+            setSelectedExperimentId(undefined);
+            setDiffPatchId(undefined);
+          }}
+        />
+      ) : null}
+
+      {isRemoveSessionOpen && session ? (
+        <RemoveSessionDialog
+          session={session}
+          onClose={() => setIsRemoveSessionOpen(false)}
+          onRemove={async () => {
+            const nextSession = (sessions ?? []).find((candidate) => candidate._id !== session._id);
+            await removeSession({ sessionId: session._id });
+            setSelectedSessionId(nextSession?._id);
             setSelectedExperimentId(undefined);
             setDiffPatchId(undefined);
           }}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Play, Pause, Plus, Minus, Square } from "lucide-react";
+import { Brain, Gauge, Play, Pause, Plus, Minus, Square } from "lucide-react";
 
 type Props = {
   session: any;
@@ -11,6 +11,9 @@ type Props = {
   onRequestExperiments: (count: number) => void;
   onSetRunners: (count: number) => void;
   onSetPlannerCount: (count: number) => void;
+  onSetComputeBudgetSeconds: (seconds: number) => void;
+  onSetResearcherEnabled: (enabled: boolean) => void;
+  onSetMemoryKeeperEnabled: (enabled: boolean) => void;
 };
 
 export function Toolbar({
@@ -23,11 +26,17 @@ export function Toolbar({
   onRequestExperiments,
   onSetRunners,
   onSetPlannerCount,
+  onSetComputeBudgetSeconds,
+  onSetResearcherEnabled,
+  onSetMemoryKeeperEnabled,
 }: Props) {
   const [requestCount, setRequestCount] = useState("5");
   const [runners, setRunners] = useState(workerControl?.desiredRunnerCount ?? 1);
   const [plannerCount, setPlannerCount] = useState(
     session?.maxPlannedConcurrentExperiments ?? workerControl?.desiredPlannerCount ?? 3,
+  );
+  const [computeBudgetSeconds, setComputeBudgetSeconds] = useState(
+    String(resolveComputeBudgetSeconds(session?.computeBudget)),
   );
 
   useEffect(() => {
@@ -40,7 +49,16 @@ export function Toolbar({
     );
   }, [session?.maxPlannedConcurrentExperiments, workerControl?.desiredPlannerCount]);
 
+  useEffect(() => {
+    setComputeBudgetSeconds(String(resolveComputeBudgetSeconds(session?.computeBudget)));
+  }, [session?.computeBudget]);
+
   const status = String(session?.status ?? "");
+  const memorySystemEnabled = session?.memory?.enabled !== false;
+  const researcherEnabled =
+    memorySystemEnabled && session?.memory?.researcher?.enabled !== false;
+  const memoryKeeperEnabled =
+    memorySystemEnabled && session?.memory?.memoryKeeper?.enabled !== false;
   const isPausable = status !== "paused" && status !== "stopped" && status !== "completed";
   const progressParts = [
     `${session?.completedExperimentCount ?? 0}/${session?.targetExperimentCount ?? 0} done`,
@@ -61,6 +79,17 @@ export function Toolbar({
     const clamped = Math.max(1, Math.min(64, Math.trunc(next)));
     setPlannerCount(clamped);
     onSetPlannerCount(clamped);
+  }
+
+  function commitComputeBudget() {
+    const next = Number.parseInt(computeBudgetSeconds, 10);
+    if (!Number.isFinite(next)) {
+      setComputeBudgetSeconds(String(resolveComputeBudgetSeconds(session?.computeBudget)));
+      return;
+    }
+    const clamped = Math.max(1, Math.min(86400, Math.trunc(next)));
+    setComputeBudgetSeconds(String(clamped));
+    onSetComputeBudgetSeconds(clamped);
   }
 
   return (
@@ -127,6 +156,50 @@ export function Toolbar({
       </div>
 
       <div className="group">
+        <span className="group-label">budget</span>
+        <div className="budget-input">
+          <Gauge size={13} />
+          <input
+            className="input"
+            type="number"
+            min={1}
+            max={86400}
+            value={computeBudgetSeconds}
+            onChange={(e) => setComputeBudgetSeconds(e.target.value)}
+            onBlur={commitComputeBudget}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") {
+                setComputeBudgetSeconds(String(resolveComputeBudgetSeconds(session?.computeBudget)));
+                e.currentTarget.blur();
+              }
+            }}
+            aria-label="compute budget seconds"
+          />
+          <span className="budget-unit">s</span>
+        </div>
+      </div>
+
+      <div className="group">
+        <button
+          type="button"
+          className={`btn btn-toggle${researcherEnabled ? " active" : ""}`}
+          aria-pressed={researcherEnabled}
+          onClick={() => onSetResearcherEnabled(!researcherEnabled)}
+        >
+          <Brain size={13} /> research
+        </button>
+        <button
+          type="button"
+          className={`btn btn-toggle${memoryKeeperEnabled ? " active" : ""}`}
+          aria-pressed={memoryKeeperEnabled}
+          onClick={() => onSetMemoryKeeperEnabled(!memoryKeeperEnabled)}
+        >
+          <Brain size={13} /> memory
+        </button>
+      </div>
+
+      <div className="group">
         <span className="group-label">request</span>
         <input
           className="input"
@@ -159,4 +232,21 @@ export function Toolbar({
       </div>
     </div>
   );
+}
+
+function resolveComputeBudgetSeconds(value: any): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const seconds =
+    value?.seconds ??
+    value?.durationSeconds ??
+    value?.benchmarkSeconds ??
+    value?.benchmarkTimeoutSeconds;
+  if (Number.isFinite(Number(seconds))) return Math.trunc(Number(seconds));
+  const minutes = value?.minutes ?? value?.durationMinutes;
+  if (Number.isFinite(Number(minutes))) return Math.trunc(Number(minutes) * 60);
+  return 300;
 }

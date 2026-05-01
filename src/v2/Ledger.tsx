@@ -6,6 +6,7 @@ import {
   statusGlyph,
   topObjectiveMetric,
 } from "./format";
+import { experimentSourceCount } from "./sources";
 
 type Props = {
   experiments: any[];
@@ -68,6 +69,7 @@ export function Ledger({
         const deltaSign = direction === "minimize" && delta !== undefined ? -delta : delta ?? 0;
         const failureReason =
           status === "failed" && !isDead ? String(e.failureReason ?? "").trim() : "";
+        const sourceCount = experimentSourceCount(e.sources);
 
         return (
           <div
@@ -97,6 +99,14 @@ export function Ledger({
                 {failureReason ? (
                   <span className="ledger-reason" title={failureReason}>
                     {failureReason}
+                  </span>
+                ) : null}
+                {sourceCount > 0 ? (
+                  <span
+                    className="source-badge"
+                    title={`${sourceCount} source${sourceCount === 1 ? "" : "s"}`}
+                  >
+                    sources {sourceCount}
                   </span>
                 ) : null}
                 {topObjective && objectiveValue !== undefined ? (

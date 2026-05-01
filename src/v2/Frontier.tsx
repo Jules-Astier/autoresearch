@@ -9,6 +9,7 @@ import {
   topObjectiveMetric,
 } from "./format";
 import type { ExperimentLite } from "./lineageTree";
+import { experimentSourceCount } from "./sources";
 
 type Props = {
   session: any;
@@ -23,6 +24,7 @@ type Point = {
   promoted: boolean;
   isHighWater: boolean;
   experimentId: string;
+  sourceCount: number;
 };
 
 const DEFAULT_PX = 44;
@@ -57,6 +59,7 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
         promoted: e.promoted,
         isHighWater: beats,
         experimentId: e._id,
+        sourceCount: experimentSourceCount(e.sources),
       };
     });
   }, [experiments, topObjective, direction]);
@@ -73,6 +76,7 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
       : undefined;
 
   const empty = trajectory.length === 0 || !topObjective;
+  const sourcedMeasured = trajectory.filter((point) => point.sourceCount > 0).length;
 
   return (
     <section className="frontier" aria-label="Frontier - top objective trajectory">
@@ -99,7 +103,9 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
           <div className="frontier-context">
             {empty
               ? "no completed experiments yet"
-              : `best at #${bestPoint?.ordinal} · ${trajectory.length} measured`}
+              : `best at #${bestPoint?.ordinal} · ${trajectory.length} measured${
+                sourcedMeasured > 0 ? ` · ${sourcedMeasured} sourced` : ""
+              }`}
           </div>
         </div>
       </div>
@@ -374,6 +380,17 @@ function Chart({
                 {p.isHighWater ? (
                   <circle cx={xOf(i)} cy={yOf(p.runningBest)} r={3.5} fill="var(--amber)" />
                 ) : null}
+                {p.sourceCount > 0 ? (
+                  <circle
+                    cx={xOf(i)}
+                    cy={yOf(p.value)}
+                    r={6}
+                    fill="none"
+                    stroke="var(--moss)"
+                    strokeWidth={1}
+                    opacity={0.85}
+                  />
+                ) : null}
                 <circle
                   cx={xOf(i)}
                   cy={yOf(p.value)}
@@ -412,6 +429,11 @@ function Chart({
             #{hover.point.ordinal} · {formatMetricValue(hover.point.value)}
             {hover.point.isHighWater ? <span className="delta up">★ best</span> : null}
             {hover.point.promoted ? <span className="delta up">✓ promoted</span> : null}
+            {hover.point.sourceCount > 0 ? (
+              <span className="source-badge source-badge-tooltip">
+                sources {hover.point.sourceCount}
+              </span>
+            ) : null}
           </div>
         ) : null}
       </div>

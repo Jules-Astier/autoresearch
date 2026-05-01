@@ -80,6 +80,12 @@ environment instead.
   "editablePaths": ["src/model.ts", "config/tunable.json", "figures/model_architecture.tex"],
   "immutablePaths": ["data/**", "config/fixed.json", "figures/**/*.pdf", "figures/**/*.png"],
   "runtimeConfigPaths": ["config/tunable.json"],
+  "workspaceLinks": [
+    {
+      "workspacePath": "prepared/large_readonly_dataset.pt",
+      "targetPath": "/absolute/path/to/shared/large_readonly_dataset.pt"
+    }
+  ],
   "modelIoContract": "Keep the public CLI and metric JSON output stable. For architecture_change experiments, update figures/model_architecture.tex using TikZ.",
   "agent": {
     "provider": "codex",
@@ -133,10 +139,20 @@ benchmark process as `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
 planner may propose in a single planning cycle. It defaults to 3 and is capped by
 the remaining target experiment count.
 
+`workspaceLinks` is important for long sessions. It creates explicit symlinks
+inside every runner workspace after checkout and before the worker or benchmark
+runs. Use it for large read-only generated inputs that should be shared across
+runs, such as prepared datasets, cached features, or tensor bundles. Without it,
+each run can leave another copy under `~/.autoresearch/runner/<session>/<run>/`.
+`workspacePath` is relative to the runner workspace and must not already exist in
+the checkout; `targetPath` is resolved at registration time and must exist on the
+runner host. Pair linked paths with `immutablePaths` so workers know they must
+read them but not modify them.
+
 ## Durable Research Memory
 
-Add a `memory` block to make researcher and memory-keeper roles first-class for
-a session:
+Researcher and memory-keeper roles default to enabled. Add a `memory` block to
+customize their paths or disable individual roles:
 
 ```json
 {
@@ -168,9 +184,10 @@ only the memory paths, preserve the hypothesis, base reference, metrics or
 failure state, current-best decision, and a short interpretation, and turn
 regressions or invalid runs into concise do-not-repeat guidance.
 
-If `memory` is omitted or `memory.enabled` is `false`, the researcher and memory
-keeper are skipped. Individual roles can be disabled with
-`memory.researcher.enabled: false` or `memory.memoryKeeper.enabled: false`.
+If `memory` is omitted, the default memory paths under `research/` are used and
+both roles are enabled. Set `memory.enabled: false` to skip both roles, or
+disable individual roles with `memory.researcher.enabled: false` or
+`memory.memoryKeeper.enabled: false`.
 
 ## TikZ Architecture Artifacts
 
@@ -322,6 +339,21 @@ Register a session from any directory:
 
 ```bash
 autoresearch session add /path/to/my-session
+```
+
+Start the local stack and run a session in one command:
+
+```bash
+autoresearch run /path/to/my-session
+```
+
+`autoresearch run` registers or updates the session, resumes it, sets desired
+local runners, and leaves the stack running in the foreground. Pass `--runners N`
+or `--planners N` to override the session's concurrency defaults. If the stack is
+already running elsewhere, use `--no-stack` with `--convex-url` when needed:
+
+```bash
+autoresearch run /path/to/my-session --no-stack --convex-url http://127.0.0.1:3210
 ```
 
 If the stack is not using the default `.env.local`, pass the Convex URL:

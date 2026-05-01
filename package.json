@@ -8,6 +8,7 @@
   },
   "scripts": {
     "init:project": "node bin/autoresearch.mjs init",
+    "run:session": "node bin/autoresearch.mjs run",
     "session:add": "node bin/autoresearch.mjs session add",
     "doctor": "node bin/autoresearch.mjs doctor",
     "install-tex:macos": "node bin/autoresearch.mjs install-tex --macos",
@@ -20,6 +21,7 @@
     "convex:seed": "convex run orchestration:seedControlPlaneDemo",
     "orchestrator:codex": "node scripts/codex-orchestrator.mjs",
     "runner:codex": "node scripts/codex-runner.mjs",
+    "test:codex-runner": "node scripts/test-codex-runner.mjs",
     "test:promotion-history": "node scripts/test-promotion-history.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173"

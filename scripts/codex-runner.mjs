@@ -4,8 +4,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { run as runSandcastle } from "@ai-hero/sandcastle";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { hostSessionStore, run as runSandcastle } from "@ai-hero/sandcastle";
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
 import { vercel } from "@ai-hero/sandcastle/sandboxes/vercel";
@@ -156,6 +156,16 @@ async function runClaim(client, claim, args) {
           prompt,
           config: runnerConfig
         });
+  await recordAgentUsage(client, {
+    sessionId: session._id,
+    experimentId: experiment._id,
+    runId,
+    role: "worker",
+    source: runnerConfig.agentProvider,
+    provider: runnerConfig.agentProvider,
+    model: runnerConfig.model,
+    usage: agent.usage
+  });
 
   const plan = readExperimentPlan(workspacePath);
   if (plan) {
@@ -446,6 +456,16 @@ async function maybeRunMemoryKeeper({
       });
       const final = result.result || result.stdout || "";
       fs.writeFileSync(finalPath, final, "utf8");
+      await recordAgentUsage(client, {
+        sessionId: session._id,
+        experimentId: experiment._id,
+        runId,
+        role: "memoryKeeper",
+        source: "memory_keeper",
+        provider: memoryKeeperConfig.agentProvider,
+        model: memoryKeeperConfig.model,
+        usage: result.usage
+      });
       await client.mutation(api.orchestration.appendAgentMessage, {
         sessionId: session._id,
         experimentId: experiment._id,
@@ -458,10 +478,90 @@ async function maybeRunMemoryKeeper({
       if (result.code !== 0) {
         await appendMemoryKeeperLog(client, runId, `memory keeper exited with ${result.code}\n`);
       }
+      try {
+        const notes = snapshotMemoryNotes(repoPath, memory);
+        if (notes.length > 0) {
+          await client.mutation(api.orchestration.recordMemoryNotes, {
+            sessionId: session._id,
+            runId,
+            notes
+          });
+        }
+      } catch (snapshotError) {
+        const message = snapshotError instanceof Error ? snapshotError.message : String(snapshotError);
+        await appendMemoryKeeperLog(client, runId, `memory snapshot failed: ${message}\n`);
+      }
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await appendMemoryKeeperLog(client, runId, `memory keeper failed: ${message}\n`);
+  }
+}
+
+function snapshotMemoryNotes(repoPath, memory) {
+  const paths = [
+    memory.notesPath,
+    memory.doNotRepeatPath,
+    memory.paperIdeasPath,
+    memory.campaignsPath,
+    memory.experimentsPath,
+    memory.templatesPath,
+    ...(memory.referencePaths ?? [])
+  ];
+  const seen = new Set();
+  const notes = [];
+  for (const relativePath of paths) {
+    if (!relativePath || seen.has(relativePath)) continue;
+    seen.add(relativePath);
+    const absolute = safeResolveRepoPath(repoPath, relativePath);
+    if (!fs.existsSync(absolute)) {
+      notes.push({ path: relativePath, kind: "missing" });
+      continue;
+    }
+    let stat;
+    try {
+      stat = fs.statSync(absolute);
+    } catch (error) {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      const entries = fs.readdirSync(absolute, { withFileTypes: true })
+        .filter((entry) => !entry.name.startsWith("."))
+        .map((entry) => `${entry.isDirectory() ? "dir " : "file"} ${entry.name}`)
+        .sort()
+        .slice(0, 50);
+      notes.push({ path: relativePath, kind: "directory", entries });
+      for (const entry of fs.readdirSync(absolute, { withFileTypes: true })) {
+        if (entry.name.startsWith(".") || !entry.isFile()) continue;
+        const childRelative = path.posix.join(relativePath, entry.name);
+        const childAbsolute = path.join(absolute, entry.name);
+        const note = readMemoryFileNote(childRelative, childAbsolute);
+        if (note) notes.push(note);
+      }
+    } else if (stat.isFile()) {
+      const note = readMemoryFileNote(relativePath, absolute);
+      if (note) notes.push(note);
+    }
+  }
+  return notes;
+}
+
+function readMemoryFileNote(relativePath, absolutePath) {
+  try {
+    const buffer = fs.readFileSync(absolutePath);
+    if (buffer.includes(0)) return null;
+    const text = buffer.toString("utf8");
+    const truncated = text.length > 32000 ? text.slice(-32000) : text;
+    const contentHash = crypto.createHash("sha256").update(truncated).digest("hex");
+    return {
+      path: relativePath,
+      kind: "file",
+      content: truncated,
+      byteLength: buffer.byteLength,
+      contentHash
+    };
+  } catch (error) {
+    return { path: relativePath, kind: "error" };
   }
 }
 
@@ -601,11 +701,46 @@ function prepareWorkspace({ session, basePatch, experiment, runId, args }) {
     runSync("git", ["add", "."], destination);
     runSync("git", ["commit", "-m", "baseline"], destination);
   }
+  applyWorkspaceLinks(destination, session.workspaceLinks);
   applyBasePatch(destination, basePatch);
   if (isArchitectureChange(experiment)) {
     installModelDiagramSkill(destination);
   }
   return destination;
+}
+
+function applyWorkspaceLinks(workspacePath, links) {
+  for (const link of normalizeWorkspaceLinks(links)) {
+    const linkPath = safeResolveWorkspacePath(workspacePath, link.workspacePath);
+    const targetPath = path.resolve(link.targetPath);
+    if (!fs.existsSync(targetPath)) {
+      throw new Error(`workspace link target does not exist: ${targetPath}`);
+    }
+    const existing = fs.lstatSync(linkPath, { throwIfNoEntry: false });
+    if (existing) {
+      if (existing.isSymbolicLink() && path.resolve(path.dirname(linkPath), fs.readlinkSync(linkPath)) === targetPath) {
+        continue;
+      }
+      throw new Error(`workspace link path already exists: ${link.workspacePath}`);
+    }
+    fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+    const targetStat = fs.statSync(targetPath);
+    const type = targetStat.isDirectory()
+      ? process.platform === "win32" ? "junction" : "dir"
+      : "file";
+    fs.symlinkSync(targetPath, linkPath, type);
+  }
+}
+
+function normalizeWorkspaceLinks(links) {
+  if (!Array.isArray(links)) return [];
+  return links
+    .filter((link) => isPlainObject(link))
+    .map((link) => ({
+      workspacePath: normalizeRelativePath(link.workspacePath),
+      targetPath: String(link.targetPath || "")
+    }))
+    .filter((link) => link.workspacePath && link.targetPath);
 }
 
 function applyBasePatch(workspacePath, basePatch) {
@@ -624,7 +759,7 @@ function applyBasePatch(workspacePath, basePatch) {
   }
 }
 
-function buildAgentPrompt({ session, basePatch, experiment, priorExperiments, workspacePath }) {
+export function buildAgentPrompt({ session, basePatch, experiment, priorExperiments, workspacePath }) {
   const experimentPrompt = String(experiment.prompt || "").trim();
   const architectureDiagramInstructions = buildArchitectureDiagramInstructions({
     session,
@@ -748,12 +883,12 @@ function buildArchitectureDiagramInstructions({ session, experiment, workspacePa
     : "- If no editable diagram source already exists, create one only if you can place it under an editable `.tex` path; otherwise stop and explain that the session needs an editable diagram path such as `figures/**/*.tex`.";
 
   return `- This architecture_change is allowed to modify the model architecture, so directly use ${MODEL_DIAGRAM_SKILL_NAME}; read ${MODEL_DIAGRAM_SKILL_PATH} before editing or creating the diagram source.
-- For the diagram work, create or update only the standalone TikZ `.tex` source for this same architecture change.
+- For the diagram work, create or update only the standalone TikZ \`.tex\` source for this same architecture change.
 - Existing editable TikZ sources:
 ${sourceList}
 ${targetLine}
-- Include the changed `.tex` source in AUTORESEARCH_EXPERIMENT.json changedFiles.
-- Do not run LaTeX, call PDF/PNG export tools, or create rendered diagram PDFs or PNGs. The local runner compiles changed TikZ `.tex` sources and stores only the PNG artifact after the patch is accepted.`;
+- Include the changed \`.tex\` source in AUTORESEARCH_EXPERIMENT.json changedFiles.
+- Do not run LaTeX, call PDF/PNG export tools, or create rendered diagram PDFs or PNGs. The local runner compiles changed TikZ \`.tex\` sources and stores only the PNG artifact after the patch is accepted.`;
 }
 
 function listExistingEditableTikzSources(workspacePath, editablePaths) {
@@ -817,7 +952,8 @@ async function runAgentDirectly({ client, runId, workspacePath, finalPath, promp
   return {
     code: result.code,
     stdout: result.result || result.stdout || "",
-    stderr: result.stderr
+    stderr: result.stderr,
+    usage: result.usage
   };
 }
 
@@ -863,7 +999,8 @@ async function runAgentInSandcastle({
     code: 0,
     stdout: result.stdout ?? "",
     stderr: "",
-    logFilePath: result.logFilePath
+    logFilePath: result.logFilePath,
+    usage: combineUsage((result.iterations ?? []).map((iteration) => iteration.usage))
   };
 }
 
@@ -1282,7 +1419,9 @@ async function runAgentProviderCommand({
     let stdout = "";
     let stderr = "";
     let result = "";
+    let sessionId;
     let stdoutLineBuffer = "";
+    const usageSnapshots = [];
     const pendingLogs = [];
 
     const append = (stream, text) => {
@@ -1304,6 +1443,8 @@ async function runAgentProviderCommand({
     };
 
     const emitParsedLine = (line) => {
+      const usage = parseUsageFromJsonLine(line);
+      if (usage) usageSnapshots.push(usage);
       const parsed = provider.parseStreamLine(line);
       if (parsed.length === 0) {
         if (line.trim()) append(stdoutStream, `${line}\n`);
@@ -1316,6 +1457,8 @@ async function runAgentProviderCommand({
           result = event.result;
         } else if (event.type === "tool_call") {
           append(stdoutStream, `[tool:${event.name}] ${event.args}\n`);
+        } else if (event.type === "session_id") {
+          sessionId = event.sessionId;
         }
       }
     };
@@ -1343,13 +1486,122 @@ async function runAgentProviderCommand({
         emitParsedLine(stdoutLineBuffer);
       }
       await Promise.allSettled(pendingLogs);
-      resolve({ code: code ?? 1, stdout, stderr, result });
+      const sessionUsage = await readProviderSessionUsage({ provider, cwd, sessionId });
+      resolve({
+        code: code ?? 1,
+        stdout,
+        stderr,
+        result,
+        usage: combineUsage([...usageSnapshots, sessionUsage])
+      });
     });
     if (input) {
       child.stdin.write(input);
     }
     child.stdin.end();
   });
+}
+
+async function readProviderSessionUsage({ provider, cwd, sessionId }) {
+  if (!provider.captureSessions || !provider.parseSessionUsage || !sessionId) {
+    return null;
+  }
+  try {
+    const content = await hostSessionStore(cwd).readSession(sessionId);
+    return provider.parseSessionUsage(content) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function recordAgentUsage(client, {
+  sessionId,
+  experimentId,
+  runId,
+  role,
+  source,
+  provider,
+  model,
+  usage
+}) {
+  if (!usage) return;
+  await client.mutation(api.orchestration.recordAgentUsage, {
+    ...definedFields({
+      sessionId,
+      experimentId,
+      runId,
+      role,
+      source,
+      provider,
+      model
+    }),
+    ...definedFields(usage)
+  });
+}
+
+function combineUsage(items) {
+  const normalized = items.map(normalizeUsage).filter(Boolean);
+  if (normalized.length === 0) return null;
+  return normalized.reduce((total, usage) => ({
+    inputTokens: addOptional(total.inputTokens, usage.inputTokens),
+    cacheCreationInputTokens: addOptional(total.cacheCreationInputTokens, usage.cacheCreationInputTokens),
+    cacheReadInputTokens: addOptional(total.cacheReadInputTokens, usage.cacheReadInputTokens),
+    outputTokens: addOptional(total.outputTokens, usage.outputTokens),
+    totalTokens: addOptional(total.totalTokens, usage.totalTokens),
+    rawUsage: [...(total.rawUsage ?? []), usage.rawUsage ?? usage]
+  }), {});
+}
+
+function normalizeUsage(value) {
+  if (!isPlainObject(value)) return null;
+  const raw = isPlainObject(value.usage) ? value.usage : value;
+  const inputTokens = numberOption(raw.inputTokens, raw.input_tokens, raw.promptTokens, raw.prompt_tokens);
+  const cacheCreationInputTokens = numberOption(raw.cacheCreationInputTokens, raw.cache_creation_input_tokens);
+  const cacheReadInputTokens = numberOption(raw.cacheReadInputTokens, raw.cache_read_input_tokens);
+  const outputTokens = numberOption(raw.outputTokens, raw.output_tokens, raw.completionTokens, raw.completion_tokens);
+  const totalTokens = numberOption(raw.totalTokens, raw.total_tokens);
+  if ([inputTokens, cacheCreationInputTokens, cacheReadInputTokens, outputTokens, totalTokens].every((item) => item === undefined)) {
+    return null;
+  }
+  return { inputTokens, cacheCreationInputTokens, cacheReadInputTokens, outputTokens, totalTokens, rawUsage: raw };
+}
+
+function parseUsageFromJsonLine(line) {
+  if (!line.startsWith("{")) return null;
+  try {
+    return findUsageObject(JSON.parse(line));
+  } catch {
+    return null;
+  }
+}
+
+function findUsageObject(value) {
+  if (!isPlainObject(value)) return null;
+  if (normalizeUsage(value)) return value;
+  for (const key of ["usage", "token_usage", "tokenUsage", "response", "message", "item"]) {
+    const found = findUsageObject(value[key]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function numberOption(...values) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+function addOptional(a, b) {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return a + b;
+}
+
+function definedFields(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined)
+  );
 }
 
 async function runProcess({
@@ -1685,7 +1937,7 @@ function bufferToArrayBuffer(buffer) {
 }
 
 function collectPatch(workspacePath, session, baseRef = "HEAD") {
-  const entries = changedEntriesFromGit(workspacePath, baseRef).filter((entry) => shouldIncludePatchFile(workspacePath, entry.file));
+  const entries = changedEntriesFromGit(workspacePath, baseRef).filter((entry) => shouldIncludePatchFile(workspacePath, entry.file, session));
   const changedFiles = entries.map((entry) => entry.file);
   const rejectedFiles = changedFiles.filter((file) => !isEditable(file, session.editablePaths));
   const fullDiff = buildDiff(workspacePath, entries, baseRef);
@@ -1706,11 +1958,17 @@ function collectPatch(workspacePath, session, baseRef = "HEAD") {
   return { changedFiles, rejectedFiles, diff, diffStat, contentHash, rejectionReason };
 }
 
-function shouldIncludePatchFile(workspacePath, file) {
+function shouldIncludePatchFile(workspacePath, file, session) {
   if (RUNNER_METADATA_FILES.has(file)) return false;
+  if (isWorkspaceLink(file, session?.workspaceLinks)) return false;
   if (isPatchOutputArtifact(file)) return false;
   if (isRenderedTexArtifact(workspacePath, file)) return false;
   return !isGeneratedArtifact(file);
+}
+
+function isWorkspaceLink(file, links) {
+  const normalized = normalizeRelativePath(file);
+  return normalizeWorkspaceLinks(links).some((link) => link.workspacePath === normalized);
 }
 
 function isPatchOutputArtifact(file) {
@@ -1895,6 +2153,9 @@ function normalizeRelativePath(value) {
 }
 
 function normalizeMemoryConfig(value) {
+  if (value === undefined || value === null) {
+    value = {};
+  }
   if (!isPlainObject(value) || value.enabled === false) {
     return null;
   }
@@ -2000,7 +2261,9 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : error);
-  process.exitCode = 1;
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack ?? error.message : error);
+    process.exitCode = 1;
+  });
+}

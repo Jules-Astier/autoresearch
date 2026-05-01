@@ -19,7 +19,14 @@
   "runtimeConfigPaths": [
     "config/tunable.json"
   ],
+  "workspaceLinks": [],
   "modelIoContract": "Preserve the existing command line interface and metric output.",
+  "memory": {
+    "enabled": true,
+    "rootPath": "research",
+    "researcher": { "enabled": true },
+    "memoryKeeper": { "enabled": true }
+  },
   "sandbox": { "environment": "none" },
   "metricContract": {
     "rankingMode": "lexicographic",

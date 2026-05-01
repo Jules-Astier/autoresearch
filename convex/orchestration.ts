@@ -4,6 +4,20 @@ import { v } from "convex/values";
 import { promotionMilestoneIdsForSession } from "./promotionHistory";
 
 const metricMap = v.record(v.string(), v.float64());
+const experimentSource = v.object({
+  title: v.optional(v.string()),
+  url: v.optional(v.string()),
+  kind: v.optional(v.string()),
+  citation: v.optional(v.string()),
+});
+const experimentSources = v.optional(v.array(experimentSource));
+const tokenUsageArgs = {
+  inputTokens: v.optional(v.float64()),
+  cacheCreationInputTokens: v.optional(v.float64()),
+  cacheReadInputTokens: v.optional(v.float64()),
+  outputTokens: v.optional(v.float64()),
+  totalTokens: v.optional(v.float64()),
+};
 const WORKER_CONTROL_KEY = "local";
 const DEFAULT_COMPUTE_BUDGET_SECONDS = 300;
 const PLANNING_CYCLE_STALE_MS = 30 * 60 * 1000;
@@ -22,6 +36,10 @@ const createSessionArgs = {
   editablePaths: v.array(v.string()),
   immutablePaths: v.array(v.string()),
   runtimeConfigPaths: v.optional(v.array(v.string())),
+  workspaceLinks: v.optional(v.array(v.object({
+    workspacePath: v.string(),
+    targetPath: v.string(),
+  }))),
   modelIoContract: v.optional(v.string()),
   agent: v.optional(v.any()),
   memory: v.optional(v.any()),
@@ -65,6 +83,10 @@ export const getSessionDetail = query({
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .order("desc")
       .take(80);
+    const agentUsage = await ctx.db
+      .query("researchAgentUsage")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
     const patches = await ctx.db
       .query("researchPatches")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
@@ -123,6 +145,8 @@ export const getSessionDetail = query({
       runs,
       events,
       messages,
+      agentUsage,
+      agentUsageSummary: summarizeAgentUsage(agentUsage),
       patches,
       artifacts,
       planningCycles,
@@ -156,6 +180,7 @@ export const createResearchSession = mutation({
     const now = nowUtc();
     const metricContract = normalizeMetricContract(args.metricContract);
     const computeBudget = normalizeComputeBudget(args.computeBudget);
+    const memory = normalizeMemoryConfig(args.memory);
     const maxPlannedConcurrentExperiments = normalizeInteger(
       args.maxPlannedConcurrentExperiments ?? 3,
       "maxPlannedConcurrentExperiments",
@@ -191,9 +216,10 @@ export const createResearchSession = mutation({
       editablePaths: args.editablePaths,
       immutablePaths: args.immutablePaths,
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
+      workspaceLinks: args.workspaceLinks ?? [],
       modelIoContract: args.modelIoContract,
       agent: args.agent,
-      memory: args.memory,
+      memory,
       metricContract,
       sandbox,
       earlyStopping: args.earlyStopping,
@@ -216,6 +242,7 @@ export const registerResearchSession = mutation({
     const now = nowUtc();
     const metricContract = normalizeMetricContract(args.metricContract);
     const computeBudget = normalizeComputeBudget(args.computeBudget);
+    const memory = normalizeMemoryConfig(args.memory);
     const maxPlannedConcurrentExperiments = normalizeInteger(
       args.maxPlannedConcurrentExperiments ?? 3,
       "maxPlannedConcurrentExperiments",
@@ -249,9 +276,10 @@ export const registerResearchSession = mutation({
         editablePaths: args.editablePaths,
         immutablePaths: args.immutablePaths,
         runtimeConfigPaths: args.runtimeConfigPaths ?? [],
+        workspaceLinks: args.workspaceLinks ?? [],
         modelIoContract: args.modelIoContract,
         agent: args.agent,
-        memory: args.memory,
+        memory,
         metricContract,
         sandbox,
         earlyStopping: args.earlyStopping,
@@ -280,9 +308,10 @@ export const registerResearchSession = mutation({
       editablePaths: args.editablePaths,
       immutablePaths: args.immutablePaths,
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
+      workspaceLinks: args.workspaceLinks ?? [],
       modelIoContract: args.modelIoContract,
       agent: args.agent,
-      memory: args.memory,
+      memory,
       metricContract,
       sandbox,
       earlyStopping: args.earlyStopping,
@@ -314,6 +343,10 @@ export const updateResearchSessionContract = mutation({
     editablePaths: v.optional(v.array(v.string())),
     immutablePaths: v.optional(v.array(v.string())),
     runtimeConfigPaths: v.optional(v.array(v.string())),
+    workspaceLinks: v.optional(v.array(v.object({
+      workspacePath: v.string(),
+      targetPath: v.string(),
+    }))),
     modelIoContract: v.optional(v.string()),
     agent: v.optional(v.any()),
     memory: v.optional(v.any()),
@@ -341,12 +374,14 @@ export const updateResearchSessionContract = mutation({
       patch.immutablePaths = args.immutablePaths;
     if (args.runtimeConfigPaths !== undefined)
       patch.runtimeConfigPaths = args.runtimeConfigPaths;
+    if (args.workspaceLinks !== undefined)
+      patch.workspaceLinks = args.workspaceLinks;
     if (args.modelIoContract !== undefined)
       patch.modelIoContract = args.modelIoContract;
     if (args.agent !== undefined)
       patch.agent = args.agent;
     if (args.memory !== undefined)
-      patch.memory = args.memory;
+      patch.memory = normalizeMemoryConfig(args.memory);
     if (args.metricContract !== undefined)
       patch.metricContract = normalizeMetricContract(args.metricContract);
     if (args.sandbox !== undefined)
@@ -364,8 +399,100 @@ export const updateResearchSessionContract = mutation({
         editablePaths: args.editablePaths,
         immutablePaths: args.immutablePaths,
         runtimeConfigPaths: args.runtimeConfigPaths,
+        workspaceLinks: args.workspaceLinks,
       },
     });
+  },
+});
+
+export const removeResearchSession = mutation({
+  args: { sessionId: v.id("researchSessions") },
+  handler: async (ctx, { sessionId }) => {
+    await mustGetSession(ctx, sessionId);
+
+    const runLogs = await ctx.db
+      .query("researchRunLogs")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of runLogs) await ctx.db.delete(row._id);
+
+    const agentMessages = await ctx.db
+      .query("researchAgentMessages")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of agentMessages) await ctx.db.delete(row._id);
+
+    const agentUsage = await ctx.db
+      .query("researchAgentUsage")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of agentUsage) await ctx.db.delete(row._id);
+
+    const events = await ctx.db
+      .query("researchEvents")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of events) await ctx.db.delete(row._id);
+
+    const memoryNotes = await ctx.db
+      .query("researchMemoryNotes")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of memoryNotes) await ctx.db.delete(row._id);
+
+    const rollbacks = await ctx.db
+      .query("researchRollbacks")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of rollbacks) await ctx.db.delete(row._id);
+
+    const planningCycles = await ctx.db
+      .query("researchPlanningCycles")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of planningCycles) await ctx.db.delete(row._id);
+
+    const artifacts = await ctx.db
+      .query("researchArtifacts")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of artifacts) await ctx.db.delete(row._id);
+
+    const patches = await ctx.db
+      .query("researchPatches")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of patches) await ctx.db.delete(row._id);
+
+    const runs = await ctx.db
+      .query("researchRuns")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of runs) await ctx.db.delete(row._id);
+
+    const experiments = await ctx.db
+      .query("researchExperiments")
+      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+      .collect();
+    for (const row of experiments) await ctx.db.delete(row._id);
+
+    await ctx.db.delete(sessionId);
+
+    return {
+      deleted: {
+        runLogs: runLogs.length,
+        agentMessages: agentMessages.length,
+        agentUsage: agentUsage.length,
+        events: events.length,
+        memoryNotes: memoryNotes.length,
+        rollbacks: rollbacks.length,
+        planningCycles: planningCycles.length,
+        artifacts: artifacts.length,
+        patches: patches.length,
+        runs: runs.length,
+        experiments: experiments.length,
+      },
+    };
   },
 });
 
@@ -375,6 +502,7 @@ export const enqueueExperiment = mutation({
     hypothesis: v.string(),
     changeKind: v.string(),
     prompt: v.optional(v.string()),
+    sources: experimentSources,
   },
   handler: async (ctx, args) => {
     const session = await mustGetSession(ctx, args.sessionId);
@@ -386,6 +514,7 @@ export const enqueueExperiment = mutation({
       changeKind: args.changeKind,
       hypothesis: args.hypothesis,
       prompt: args.prompt ?? "",
+      sources: args.sources,
       promoted: false,
       createdAtUtc: now,
       updatedAtUtc: now,
@@ -412,6 +541,7 @@ export const enqueueExperimentBatch = mutation({
         hypothesis: v.string(),
         changeKind: v.string(),
         prompt: v.optional(v.string()),
+        sources: experimentSources,
       }),
     ),
     planningCycleId: v.optional(v.id("researchPlanningCycles")),
@@ -529,6 +659,7 @@ export const finishPlanningCycle = mutation({
         hypothesis: v.string(),
         changeKind: v.string(),
         prompt: v.optional(v.string()),
+        sources: experimentSources,
       }),
     ),
   },
@@ -581,6 +712,25 @@ export const finishPlanningCycle = mutation({
       sessionId: cycle.sessionId,
       experiments: args.approvedExperiments,
       planningCycleId: args.planningCycleId,
+    });
+  },
+});
+
+export const recordPlanningCycleResearcherOutput = mutation({
+  args: {
+    planningCycleId: v.id("researchPlanningCycles"),
+    researcherOutput: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const cycle = await ctx.db.get(args.planningCycleId);
+    if (!cycle) {
+      throw new Error(`missing planning cycle ${args.planningCycleId}`);
+    }
+    if (cycle.status !== "running") {
+      return;
+    }
+    await ctx.db.patch(args.planningCycleId, {
+      researcherOutput: args.researcherOutput.slice(-20000),
     });
   },
 });
@@ -758,6 +908,36 @@ export const appendAgentMessage = mutation({
   handler: async (ctx, args) => {
     await ctx.db.insert("researchAgentMessages", {
       ...args,
+      createdAtUtc: nowUtc(),
+    });
+  },
+});
+
+export const recordAgentUsage = mutation({
+  args: {
+    sessionId: v.id("researchSessions"),
+    experimentId: v.optional(v.id("researchExperiments")),
+    runId: v.optional(v.id("researchRuns")),
+    planningCycleId: v.optional(v.id("researchPlanningCycles")),
+    role: v.string(),
+    source: v.string(),
+    provider: v.string(),
+    model: v.optional(v.string()),
+    ...tokenUsageArgs,
+    rawUsage: v.optional(v.any()),
+  },
+  handler: async (ctx, args) => {
+    const totalTokens =
+      args.totalTokens ??
+      sumDefined([
+        args.inputTokens,
+        args.cacheCreationInputTokens,
+        args.cacheReadInputTokens,
+        args.outputTokens,
+      ]);
+    await ctx.db.insert("researchAgentUsage", {
+      ...args,
+      totalTokens,
       createdAtUtc: nowUtc(),
     });
   },
@@ -1710,6 +1890,12 @@ async function insertExperimentBatch(
       hypothesis: string;
       changeKind: string;
       prompt?: string;
+      sources?: Array<{
+        title?: string;
+        url?: string;
+        kind?: string;
+        citation?: string;
+      }>;
     }>;
     planningCycleId?: Id<"researchPlanningCycles">;
   },
@@ -1727,6 +1913,7 @@ async function insertExperimentBatch(
       changeKind: item.changeKind,
       hypothesis: item.hypothesis,
       prompt: item.prompt ?? "",
+      sources: item.sources,
       promoted: false,
       createdAtUtc: now,
       updatedAtUtc: now,
@@ -2132,6 +2319,51 @@ function normalizeComputeBudget(value: any): any {
   return { ...value, seconds };
 }
 
+function normalizeMemoryConfig(value: any): any {
+  if (value === undefined || value === null || value === "") {
+    value = {};
+  }
+  if (typeof value === "boolean") {
+    value = { enabled: value };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("memory must be an object or boolean when provided");
+  }
+  const enabled = value.enabled === undefined || value.enabled === null
+    ? true
+    : requireBoolean(value.enabled, "memory.enabled");
+  return {
+    ...value,
+    enabled,
+    rootPath: optionalString(value.rootPath) ?? "research",
+    researcher: normalizeMemoryRoleConfig(value.researcher, enabled, "memory.researcher"),
+    memoryKeeper: normalizeMemoryRoleConfig(value.memoryKeeper, enabled, "memory.memoryKeeper"),
+  };
+}
+
+function normalizeMemoryRoleConfig(value: any, defaultEnabled: boolean, field: string): any {
+  if (value === undefined || value === null || value === "") {
+    return { enabled: defaultEnabled };
+  }
+  if (typeof value === "boolean") {
+    return { enabled: value };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${field} must be an object or boolean when provided`);
+  }
+  const enabled = value.enabled === undefined || value.enabled === null
+    ? defaultEnabled
+    : requireBoolean(value.enabled, `${field}.enabled`);
+  return { ...value, enabled };
+}
+
+function requireBoolean(value: any, field: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`${field} must be a boolean`);
+  }
+  return value;
+}
+
 function normalizeSandboxConfig(value: any): any {
   if (value === undefined || value === null || value === "") {
     return { environment: "none", backend: "direct" };
@@ -2404,6 +2636,64 @@ function shouldEarlyStop(
     return false;
   }
   return nextCompleted >= patience;
+}
+
+type AgentUsageRow = {
+  role: string;
+  source: string;
+  inputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+};
+
+function summarizeAgentUsage(rows: AgentUsageRow[]) {
+  const totals = emptyUsageSummary();
+  const byRole: Record<string, ReturnType<typeof emptyUsageSummary>> = {};
+  const bySource: Record<string, ReturnType<typeof emptyUsageSummary>> = {};
+  for (const row of rows) {
+    addUsage(totals, row);
+    addUsage(byRole[row.role] ??= emptyUsageSummary(), row);
+    addUsage(bySource[row.source] ??= emptyUsageSummary(), row);
+  }
+  return { totals, byRole, bySource };
+}
+
+function emptyUsageSummary() {
+  return {
+    calls: 0,
+    inputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+  };
+}
+
+function addUsage(target: ReturnType<typeof emptyUsageSummary>, row: AgentUsageRow) {
+  target.calls += 1;
+  target.inputTokens += row.inputTokens ?? 0;
+  target.cacheCreationInputTokens += row.cacheCreationInputTokens ?? 0;
+  target.cacheReadInputTokens += row.cacheReadInputTokens ?? 0;
+  target.outputTokens += row.outputTokens ?? 0;
+  target.totalTokens +=
+    row.totalTokens ??
+    sumDefined([
+      row.inputTokens,
+      row.cacheCreationInputTokens,
+      row.cacheReadInputTokens,
+      row.outputTokens,
+    ]) ??
+    0;
+}
+
+function sumDefined(values: Array<number | undefined>): number | undefined {
+  const numbers = values.filter((value): value is number => typeof value === "number");
+  if (numbers.length === 0) {
+    return undefined;
+  }
+  return numbers.reduce((sum, value) => sum + value, 0);
 }
 
 function normalizeInteger(

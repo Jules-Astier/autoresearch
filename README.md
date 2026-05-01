@@ -44,6 +44,17 @@ autoresearch dev
 The first Convex run writes `VITE_CONVEX_URL` to `.env.local`. Local Convex state
 lives under `.convex/` and is intentionally ignored by git.
 
+To start the stack and immediately run a session:
+
+```bash
+autoresearch run /path/to/my-session
+```
+
+That registers or updates the session, resumes it, sets local runner control, and
+keeps the local stack attached in the current terminal. Use `--runners N` or
+`--planners N` to override the session defaults, or `--no-stack` to target an
+already running Convex backend.
+
 ## Register A Session
 
 Initialize Autoresearch files inside a target project:
@@ -113,6 +124,12 @@ Docker, Podman, or Vercel execution for agent and benchmark runs, and can select
 Metrics are parsed from the last JSON object in benchmark output or from
 `metric_name: 1.23` lines.
 
+Set `workspaceLinks` whenever the benchmark uses large read-only generated
+inputs, such as prepared datasets or feature tensors. Without it, each run can
+leave its own copy inside `~/.autoresearch/runner/<session>/<run>/`, which adds
+up quickly in long sessions. Keep the path immutable and link only files or
+directories the worker and benchmark must read, not edit.
+
 `computeBudget` controls how long the runner lets each benchmark execute. Omit
 it for the 5 minute default, or set `"computeBudget": { "seconds": 600 }`. The
 benchmark process also receives `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
@@ -121,10 +138,11 @@ benchmark process also receives `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
 `sandbox.environment` selects where workers and benchmarks run: `none` for host
 execution, or `docker`, `podman`, or `vercel` through Sandcastle.
 
-Sessions can also opt into durable research memory with a `memory` block. The
-researcher runs before planning to turn notes and references into candidate
-hypotheses; the memory keeper runs after each run to update repo-local notes,
-duplicate warnings, and campaign context.
+Sessions default to durable research memory being enabled. The researcher runs
+before planning to turn notes and references into candidate hypotheses; the
+memory keeper runs after each run to update repo-local notes, duplicate
+warnings, and campaign context. Disable either role with
+`memory.researcher.enabled: false` or `memory.memoryKeeper.enabled: false`.
 
 Top-level `agent.provider`/`agent.model` are defaults for `researcher`,
 `planner`, `reviewer`, `worker`, and `memoryKeeper`. Override a role with
@@ -157,6 +175,7 @@ autoresearch install-tex --macos
 
 ```bash
 autoresearch dev
+autoresearch run ./my-session
 autoresearch init
 autoresearch session guide ./my-session --repo-path ../target-project
 autoresearch session add ./my-session

@@ -19,6 +19,7 @@
   "runtimeConfigPaths": [
     "config/tunable.json"
   ],
+  "workspaceLinks": [],
   "modelIoContract": "Preserve the existing command line interface and metric output.",
   "agent": {
     "provider": "codex",

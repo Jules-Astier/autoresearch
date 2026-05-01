@@ -1,6 +1,13 @@
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
+const researchExperimentSource = v.object({
+  title: v.optional(v.string()),
+  url: v.optional(v.string()),
+  kind: v.optional(v.string()),
+  citation: v.optional(v.string())
+});
+
 export default defineSchema({
   sessions: defineTable({
     sessionId: v.string(),
@@ -73,6 +80,10 @@ export default defineSchema({
     editablePaths: v.array(v.string()),
     immutablePaths: v.array(v.string()),
     runtimeConfigPaths: v.array(v.string()),
+    workspaceLinks: v.optional(v.array(v.object({
+      workspacePath: v.string(),
+      targetPath: v.string()
+    }))),
     modelIoContract: v.optional(v.string()),
     agent: v.optional(v.any()),
     memory: v.optional(v.any()),
@@ -103,6 +114,7 @@ export default defineSchema({
     activeRunId: v.optional(v.id("researchRuns")),
     metrics: v.optional(v.record(v.string(), v.float64())),
     score: v.optional(v.float64()),
+    sources: v.optional(v.array(researchExperimentSource)),
     promoted: v.boolean(),
     createdAtUtc: v.string(),
     updatedAtUtc: v.string()
@@ -220,6 +232,28 @@ export default defineSchema({
     .index("by_session", ["sessionId", "createdAtUtc"])
     .index("by_experiment", ["experimentId", "sequence"])
     .index("by_run", ["runId", "sequence"]),
+
+  researchAgentUsage: defineTable({
+    sessionId: v.id("researchSessions"),
+    experimentId: v.optional(v.id("researchExperiments")),
+    runId: v.optional(v.id("researchRuns")),
+    planningCycleId: v.optional(v.id("researchPlanningCycles")),
+    role: v.string(),
+    source: v.string(),
+    provider: v.string(),
+    model: v.optional(v.string()),
+    inputTokens: v.optional(v.float64()),
+    cacheCreationInputTokens: v.optional(v.float64()),
+    cacheReadInputTokens: v.optional(v.float64()),
+    outputTokens: v.optional(v.float64()),
+    totalTokens: v.optional(v.float64()),
+    rawUsage: v.optional(v.any()),
+    createdAtUtc: v.string()
+  })
+    .index("by_session", ["sessionId", "createdAtUtc"])
+    .index("by_role", ["sessionId", "role"])
+    .index("by_run", ["runId", "createdAtUtc"])
+    .index("by_planning_cycle", ["planningCycleId", "createdAtUtc"]),
 
   researchEvents: defineTable({
     sessionId: v.id("researchSessions"),
