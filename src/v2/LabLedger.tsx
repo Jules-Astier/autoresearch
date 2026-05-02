@@ -33,6 +33,7 @@ export function LabLedger() {
   const setSessionConcurrency = useMutation(api.orchestration.setSessionConcurrency);
   const setWorkerControl = useMutation(api.orchestration.setWorkerControl);
   const updateSessionContract = useMutation(api.orchestration.updateResearchSessionContract);
+  const switchObjectiveWithGuardrail = useMutation(api.orchestration.switchObjectiveWithGuardrail);
   const registerSession = useMutation(api.orchestration.registerResearchSession);
   const removeSession = useMutation(api.orchestration.removeResearchSession);
   const restartSession = useMutation(api.orchestration.restartResearchSession);
@@ -194,6 +195,12 @@ export function LabLedger() {
                       computeBudget: { ...(session.computeBudget ?? {}), seconds },
                     });
                   }}
+                  onSetPreemptivePlanning={(enabled) => {
+                    void updateSessionContract({
+                      sessionId: session._id,
+                      preemptivePlanning: enabled,
+                    });
+                  }}
                   onSetResearcherEnabled={(enabled) => {
                     void updateSessionContract({
                       sessionId: session._id,
@@ -228,6 +235,12 @@ export function LabLedger() {
                     updateSessionContract({
                       sessionId: session._id,
                       metricContract,
+                    })
+                  }
+                  onSwitchObjective={(args) =>
+                    switchObjectiveWithGuardrail({
+                      sessionId: session._id,
+                      ...args,
                     })
                   }
                 />

@@ -502,6 +502,8 @@ export const updateResearchSessionContract = mutation({
     if (args.metricContract !== undefined) {
       normalizedMetricContract = normalizeMetricContract(args.metricContract);
       patch.metricContract = normalizedMetricContract;
+      patch.pendingMetricContract = undefined;
+      patch.pendingMetricSwitch = undefined;
     }
     if (args.sandbox !== undefined)
       patch.sandbox = normalizeSandboxConfig(args.sandbox);
@@ -529,7 +531,8 @@ export const updateResearchSessionContract = mutation({
       patch.bestMetrics = best?.metrics;
 
       for (const experiment of experiments) {
-        const shouldPromote = promotionMilestoneIds.has(String(experiment._id));
+        const shouldPromote =
+          experiment.promoted || promotionMilestoneIds.has(String(experiment._id));
         if (experiment.promoted !== shouldPromote) {
           await ctx.db.patch(experiment._id, {
             promoted: shouldPromote,
@@ -550,12 +553,64 @@ export const updateResearchSessionContract = mutation({
         preemptivePlanning: args.preemptivePlanning,
         metricContract: normalizedMetricContract,
         bestExperimentId: patch.bestExperimentId,
+        historicPromotionsPreserved: normalizedMetricContract !== undefined,
         editablePaths: args.editablePaths,
         immutablePaths: args.immutablePaths,
         runtimeConfigPaths: args.runtimeConfigPaths,
         workspaceLinks: args.workspaceLinks,
       },
     });
+  },
+});
+
+export const switchObjectiveWithGuardrail = mutation({
+  args: {
+    sessionId: v.id("researchSessions"),
+    nextObjective: v.string(),
+    preserveMetric: v.string(),
+    allowedRegression: v.optional(v.float64()),
+    applyNow: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const { session, activeRunCount } = await reconcileSessionState(ctx, args.sessionId, {
+      now: nowUtc(),
+      expireStale: true,
+    });
+    const transition = buildGuardrailedMetricSwitch({
+      session,
+      nextObjective: args.nextObjective,
+      preserveMetric: args.preserveMetric,
+      allowedRegression: args.allowedRegression ?? 0,
+    });
+
+    if (activeRunCount > 0 && args.applyNow !== true) {
+      await ctx.db.patch(args.sessionId, {
+        pendingMetricContract: transition.metricContract,
+        pendingMetricSwitch: transition.switchRecord,
+        updatedAtUtc: nowUtc(),
+      });
+      await insertEvent(ctx, {
+        sessionId: args.sessionId,
+        type: "metric_policy.switch_queued",
+        message: `Queued objective switch to ${transition.switchRecord.toObjective} after active runs finish.`,
+        payload: transition.switchRecord,
+      });
+      return {
+        status: "queued",
+        activeRunCount,
+        metricContract: transition.metricContract,
+      };
+    }
+
+    await applyMetricContractTransition(ctx, args.sessionId, transition.metricContract, {
+      ...transition.switchRecord,
+      appliedWithActiveRuns: activeRunCount > 0,
+    });
+    return {
+      status: "applied",
+      activeRunCount,
+      metricContract: transition.metricContract,
+    };
   },
 });
 
@@ -1041,11 +1096,17 @@ export const claimNextExperiment = mutation({
     for (const claimedSession of claimedSessions.sort((a, b) =>
       a.updatedAtUtc.localeCompare(b.updatedAtUtc),
     )) {
-      const { session } = await reconcileSessionState(ctx, claimedSession._id, {
+      const { session, activeRunCount } = await reconcileSessionState(ctx, claimedSession._id, {
         now,
         expireStale: true,
       });
       if (session.status !== "running") {
+        continue;
+      }
+      if (session.pendingMetricContract) {
+        if (activeRunCount === 0) {
+          await applyPendingMetricSwitch(ctx, session._id);
+        }
         continue;
       }
       if (session.activeRunCount >= session.maxConcurrentRuns) {
@@ -1523,6 +1584,9 @@ export const completeRun = mutation({
         ...(failureReason ? { error: failureReason } : {}),
       },
     });
+    if (nextActive === 0 && session.pendingMetricContract) {
+      await applyPendingMetricSwitch(ctx, run.sessionId);
+    }
     return { status, score, promoted, sessionStatus: nextStatus };
   },
 });
@@ -1610,6 +1674,9 @@ export const failRun = mutation({
           : {}),
       },
     });
+    if (Math.max(0, session.activeRunCount - 1) === 0 && session.pendingMetricContract) {
+      await applyPendingMetricSwitch(ctx, run.sessionId);
+    }
   },
 });
 
@@ -2810,6 +2877,200 @@ async function insertEvent(
   await ctx.db.insert("researchEvents", {
     ...args,
     createdAtUtc: nowUtc(),
+  });
+}
+
+function buildGuardrailedMetricSwitch({
+  session,
+  nextObjective,
+  preserveMetric,
+  allowedRegression,
+}: {
+  session: Doc<"researchSessions">;
+  nextObjective: string;
+  preserveMetric: string;
+  allowedRegression: number;
+}) {
+  const nextName = nextObjective.trim();
+  const preserveName = preserveMetric.trim();
+  if (!nextName) {
+    throw new Error("nextObjective is required");
+  }
+  if (!preserveName) {
+    throw new Error("preserveMetric is required");
+  }
+  if (nextName === preserveName) {
+    throw new Error("nextObjective and preserveMetric must be different metrics");
+  }
+  if (!Number.isFinite(allowedRegression) || allowedRegression < 0) {
+    throw new Error("allowedRegression must be a non-negative number");
+  }
+
+  const contract = normalizeMetricContract(session.metricContract);
+  const metrics = Array.isArray(contract.metrics) ? contract.metrics : [];
+  const nextSpec = metrics.find((spec: any) => String(spec?.name) === nextName);
+  const preserveSpec = metrics.find((spec: any) => String(spec?.name) === preserveName);
+  if (!nextSpec) {
+    throw new Error(`Metric ${nextName} is not in the session metric contract`);
+  }
+  if (!preserveSpec) {
+    throw new Error(`Metric ${preserveName} is not in the session metric contract`);
+  }
+
+  const sourceMetric = session.bestMetrics?.[preserveName];
+  if (typeof sourceMetric !== "number" || !Number.isFinite(sourceMetric)) {
+    throw new Error(`Current best metrics do not include numeric ${preserveName}`);
+  }
+
+  const preserveDirection = String(preserveSpec.direction ?? "minimize");
+  const guardrail =
+    preserveDirection === "maximize"
+      ? { min: sourceMetric - allowedRegression }
+      : { max: sourceMetric + allowedRegression };
+  const objectiveNames = new Set([nextName, preserveName]);
+  const remaining = metrics.filter((spec: any) => !objectiveNames.has(String(spec?.name)));
+  const otherObjectives = remaining.filter((spec: any) => isObjectiveMetricSpec(spec));
+  const existingConstraints = remaining.filter((spec: any) => !isObjectiveMetricSpec(spec));
+  const guardedSpec = {
+    ...preserveSpec,
+    role: "constraint",
+    ...guardrail,
+    guardrail: {
+      source: "best_experiment",
+      sourceMetric,
+      allowedRegression,
+      previousRole: String(preserveSpec.role ?? "objective"),
+    },
+  };
+  const priorPolicyVersion = Number(contract.policyVersion ?? 1);
+  const nextContract = normalizeMetricContract({
+    ...contract,
+    policyVersion: Number.isFinite(priorPolicyVersion)
+      ? Math.max(priorPolicyVersion, 2)
+      : 2,
+    rankingMode: "lexicographic",
+    primaryMetric: nextName,
+    direction: nextSpec.direction,
+    metrics: [
+      { ...nextSpec, role: "objective" },
+      ...otherObjectives,
+      guardedSpec,
+      ...existingConstraints,
+    ],
+  });
+  const switchRecord = {
+    fromObjective: preserveName,
+    toObjective: nextName,
+    preserveMetric: preserveName,
+    sourceMetric,
+    allowedRegression,
+    guardrail,
+    sourceExperimentId: session.bestExperimentId,
+  };
+  return { metricContract: nextContract, switchRecord };
+}
+
+async function applyPendingMetricSwitch(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+) {
+  const session = await mustGetSession(ctx, sessionId);
+  const pendingSwitch = session.pendingMetricSwitch;
+  if (
+    pendingSwitch &&
+    typeof pendingSwitch.toObjective === "string" &&
+    typeof pendingSwitch.preserveMetric === "string"
+  ) {
+    const transition = buildGuardrailedMetricSwitch({
+      session,
+      nextObjective: pendingSwitch.toObjective,
+      preserveMetric: pendingSwitch.preserveMetric,
+      allowedRegression: Number(pendingSwitch.allowedRegression ?? 0),
+    });
+    await applyMetricContractTransition(
+      ctx,
+      sessionId,
+      transition.metricContract,
+      {
+        ...transition.switchRecord,
+        queuedAtSourceMetric: pendingSwitch.sourceMetric,
+      },
+    );
+    return;
+  }
+
+  if (session.pendingMetricContract) {
+    await applyMetricContractTransition(
+      ctx,
+      sessionId,
+      session.pendingMetricContract,
+      {
+        toObjective: session.pendingMetricContract.primaryMetric,
+        preserveMetric: "previous objective",
+      },
+    );
+  }
+}
+
+async function applyMetricContractTransition(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+  metricContract: any,
+  switchRecord: any,
+) {
+  const session = await mustGetSession(ctx, sessionId);
+  const experiments = await ctx.db
+    .query("researchExperiments")
+    .withIndex("by_session", (q: any) => q.eq("sessionId", sessionId))
+    .collect();
+  const rescoredSession = { ...session, metricContract };
+  const best = bestExperimentForSession(rescoredSession, experiments);
+  const promotionMilestoneIds = promotionMilestoneIdsForSession(
+    metricContract,
+    experiments.map((experiment: Doc<"researchExperiments">) => ({
+      id: String(experiment._id),
+      ordinal: experiment.ordinal,
+      status: experiment.status,
+      metrics: experiment.metrics,
+      score: experiment.score,
+    })),
+  );
+  const now = nowUtc();
+
+  for (const experiment of experiments) {
+    const shouldPromote =
+      experiment.promoted || promotionMilestoneIds.has(String(experiment._id));
+    const nextScore = experiment.metrics
+      ? scoreMetrics(metricContract, experiment.metrics)
+      : undefined;
+    if (experiment.promoted !== shouldPromote || experiment.score !== nextScore) {
+      await ctx.db.patch(experiment._id, {
+        promoted: shouldPromote,
+        score: nextScore,
+        updatedAtUtc: now,
+      });
+    }
+  }
+
+  await ctx.db.patch(sessionId, {
+    metricContract,
+    pendingMetricContract: undefined,
+    pendingMetricSwitch: undefined,
+    bestExperimentId: best?.experiment._id,
+    bestScore: best?.score,
+    bestMetrics: best?.metrics,
+    updatedAtUtc: now,
+  });
+  await insertEvent(ctx, {
+    sessionId,
+    type: "metric_policy.switched",
+    message: `Switched objective to ${switchRecord.toObjective} with ${switchRecord.preserveMetric} guardrail.`,
+    payload: {
+      ...switchRecord,
+      metricContract,
+      bestExperimentId: best?.experiment._id,
+      historicPromotionsPreserved: true,
+    },
   });
 }
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Brain, Gauge, Play, Pause, Plus, Minus, Square } from "lucide-react";
+import { Brain, FastForward, Gauge, Play, Pause, Plus, Minus, Square } from "lucide-react";
 
 type Props = {
   session: any;
@@ -12,6 +12,7 @@ type Props = {
   onSetRunners: (count: number) => void;
   onSetPlannerCount: (count: number) => void;
   onSetComputeBudgetSeconds: (seconds: number) => void;
+  onSetPreemptivePlanning: (enabled: boolean) => void;
   onSetResearcherEnabled: (enabled: boolean) => void;
   onSetMemoryKeeperEnabled: (enabled: boolean) => void;
 };
@@ -27,6 +28,7 @@ export function Toolbar({
   onSetRunners,
   onSetPlannerCount,
   onSetComputeBudgetSeconds,
+  onSetPreemptivePlanning,
   onSetResearcherEnabled,
   onSetMemoryKeeperEnabled,
 }: Props) {
@@ -62,6 +64,7 @@ export function Toolbar({
     memorySystemEnabled && session?.memory?.researcher?.enabled !== false;
   const memoryKeeperEnabled =
     memorySystemEnabled && session?.memory?.memoryKeeper?.enabled !== false;
+  const preemptivePlanningEnabled = session?.preemptivePlanning !== false;
   const isPausable = status !== "paused" && status !== "stopped" && status !== "completed";
   const lifecycleDetail =
     status === "paused" && (session?.activeRunCount ?? 0) > 0
@@ -219,6 +222,15 @@ export function Toolbar({
       </div>
 
       <div className="group">
+        <button
+          type="button"
+          className={`btn btn-toggle${preemptivePlanningEnabled ? " active" : ""}`}
+          aria-pressed={preemptivePlanningEnabled}
+          title="Plan the next batch while active runs are still finishing."
+          onClick={() => onSetPreemptivePlanning(!preemptivePlanningEnabled)}
+        >
+          <FastForward size={13} /> preemptive
+        </button>
         <button
           type="button"
           className={`btn btn-toggle${researcherEnabled ? " active" : ""}`}

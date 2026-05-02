@@ -1,21 +1,34 @@
-import { ArrowDown, ArrowUp, SlidersHorizontal } from "lucide-react";
+import { useState } from "react";
+import { ArrowDown, ArrowUp, Crosshair, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import { metricDirection, objectiveMetricSpecs } from "./format";
 
 type Props = {
   session: any;
   bestExperimentOrdinal?: number;
   onReorder: (metricContract: any) => Promise<unknown> | void;
+  onSwitchObjective?: (args: {
+    nextObjective: string;
+    preserveMetric: string;
+    allowedRegression: number;
+  }) => Promise<unknown> | void;
 };
 
 export function MetricPriorityPanel({
   session,
   bestExperimentOrdinal,
   onReorder,
+  onSwitchObjective,
 }: Props) {
   const metricContract = session?.metricContract ?? {};
   const objectiveMetrics = objectiveMetricSpecs(metricContract);
   const rankingMode = String(metricContract?.rankingMode ?? "");
   const canReorder = objectiveMetrics.length > 1;
+  const topObjective = objectiveMetrics[0] ? String(objectiveMetrics[0].name) : "";
+  const topDirection = topObjective ? metricDirection(metricContract, topObjective) : "minimize";
+  const topBest = topObjective ? session?.bestMetrics?.[topObjective] : undefined;
+  const pendingSwitch = session?.pendingMetricSwitch;
+  const [switchTarget, setSwitchTarget] = useState<string | null>(null);
+  const [allowedRegression, setAllowedRegression] = useState("0");
 
   function moveMetric(index: number, delta: -1 | 1) {
     const nextIndex = index + delta;
@@ -40,6 +53,19 @@ export function MetricPriorityPanel({
     });
   }
 
+  function confirmSwitch(nextObjective: string) {
+    const parsed = Number(allowedRegression);
+    if (!onSwitchObjective || !topObjective || !Number.isFinite(parsed) || parsed < 0) {
+      return;
+    }
+    void onSwitchObjective({
+      nextObjective,
+      preserveMetric: topObjective,
+      allowedRegression: parsed,
+    });
+    setSwitchTarget(null);
+  }
+
   return (
     <section className="metric-priority-panel" aria-label="Metric priority">
       <div className="metric-priority-head">
@@ -51,6 +77,7 @@ export function MetricPriorityPanel({
           <div className="metric-priority-meta">
             {rankingMode === "lexicographic" ? "lexicographic ranking" : "ranking order"}
             {bestExperimentOrdinal ? ` · current best #${bestExperimentOrdinal}` : ""}
+            {pendingSwitch ? ` · switch queued to ${pendingSwitch.toObjective}` : ""}
           </div>
         </div>
       </div>
@@ -67,6 +94,21 @@ export function MetricPriorityPanel({
                 <span className="metric-priority-direction">{direction}</span>
               </div>
               <div className="metric-priority-actions">
+                {index > 0 && onSwitchObjective ? (
+                  <button
+                    type="button"
+                    className="btn icon-btn"
+                    disabled={typeof topBest !== "number"}
+                    aria-label={`Optimize ${name} while preserving ${topObjective}`}
+                    title={`Optimize ${name} while preserving ${topObjective}`}
+                    onClick={() => {
+                      setSwitchTarget(switchTarget === name ? null : name);
+                      setAllowedRegression("0");
+                    }}
+                  >
+                    <Crosshair size={14} />
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="btn icon-btn"
@@ -88,6 +130,44 @@ export function MetricPriorityPanel({
                   <ArrowDown size={14} />
                 </button>
               </div>
+              {switchTarget === name ? (
+                <div className="metric-switch-row">
+                  <div className="metric-switch-copy">
+                    <ShieldCheck size={13} />
+                    <span>
+                      preserve {topObjective} {topDirection === "maximize" ? "above" : "below"}{" "}
+                      {typeof topBest === "number" ? String(topBest) : "current best"}
+                    </span>
+                  </div>
+                  <input
+                    className="metric-switch-input"
+                    type="number"
+                    min="0"
+                    step="any"
+                    value={allowedRegression}
+                    aria-label={`Allowed ${topObjective} regression`}
+                    title={`Allowed ${topObjective} regression`}
+                    onChange={(event) => setAllowedRegression(event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="btn metric-switch-confirm"
+                    disabled={!Number.isFinite(Number(allowedRegression)) || Number(allowedRegression) < 0}
+                    onClick={() => confirmSwitch(name)}
+                  >
+                    apply
+                  </button>
+                  <button
+                    type="button"
+                    className="btn icon-btn"
+                    aria-label="Cancel objective switch"
+                    title="Cancel"
+                    onClick={() => setSwitchTarget(null)}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ) : null}
             </li>
           );
         })}

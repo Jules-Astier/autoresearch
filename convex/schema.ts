@@ -89,6 +89,8 @@ export default defineSchema({
     agent: v.optional(v.any()),
     memory: v.optional(v.any()),
     metricContract: v.any(),
+    pendingMetricContract: v.optional(v.any()),
+    pendingMetricSwitch: v.optional(v.any()),
     sandbox: v.optional(v.any()),
     earlyStopping: v.optional(v.any()),
     bestExperimentId: v.optional(v.id("researchExperiments")),
