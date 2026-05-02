@@ -73,6 +73,7 @@ export default defineSchema({
     targetExperimentCount: v.float64(),
     maxConcurrentRuns: v.float64(),
     maxPlannedConcurrentExperiments: v.optional(v.float64()),
+    preemptivePlanning: v.optional(v.boolean()),
     completedExperimentCount: v.float64(),
     activeRunCount: v.float64(),
     nextExperimentOrdinal: v.float64(),

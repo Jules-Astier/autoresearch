@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Maximize2, Minus, Plus } from "lucide-react";
+import { Minus, Plus, ScanSearch } from "lucide-react";
 import type { Lineage } from "./lineageTree";
 
 type Props = {
@@ -236,7 +236,7 @@ export function Lineage({ lineage, selectedExperimentId, onSelect }: Props) {
           <Minus size={14} />
         </button>
         <button type="button" className="lineage-ctrl" onClick={() => fitToTrunk(true)} title="Focus latest">
-          <Maximize2 size={14} />
+          <ScanSearch size={14} />
         </button>
       </div>
 

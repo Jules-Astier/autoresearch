@@ -927,6 +927,7 @@ function buildArchitectureDiagramInstructions({ session, experiment, workspacePa
 
   return `- This architecture_change is allowed to modify the model architecture, so directly use ${MODEL_DIAGRAM_SKILL_NAME}; read ${MODEL_DIAGRAM_SKILL_PATH} before editing or creating the diagram source.
 - For the diagram work, create or update only the standalone TikZ \`.tex\` source for this same architecture change.
+- When the diagram uses math notation, include the required standard packages in the source, for example \`\\usepackage{amsfonts}\` or \`\\usepackage{amssymb}\` for \`\\mathbb\`.
 - Existing editable TikZ sources:
 ${sourceList}
 ${targetLine}
@@ -1888,20 +1889,21 @@ function compileTikzPdf(sourceAbsolutePath, outputDir) {
   const latexmk = findExecutable("latexmk", [TEX_BIN_DIR]);
   const pdflatex = findExecutable("pdflatex", [TEX_BIN_DIR]);
   const cwd = path.dirname(sourceAbsolutePath);
+  const compileSourcePath = prepareTikzSourceForCompilation(sourceAbsolutePath, outputDir);
   if (latexmk) {
     runCommandOrThrow(latexmk, [
       "-pdf",
       "-interaction=nonstopmode",
       "-halt-on-error",
       `-outdir=${outputDir}`,
-      sourceAbsolutePath
+      compileSourcePath
     ], cwd);
   } else if (pdflatex) {
     runCommandOrThrow(pdflatex, [
       "-interaction=nonstopmode",
       "-halt-on-error",
       `-output-directory=${outputDir}`,
-      sourceAbsolutePath
+      compileSourcePath
     ], cwd);
   } else {
     throw new Error("TikZ artifact rendering requires latexmk or pdflatex. Run `autoresearch doctor`.");
@@ -1912,6 +1914,49 @@ function compileTikzPdf(sourceAbsolutePath, outputDir) {
     throw new Error(`TikZ artifact rendering did not produce ${pdfPath}`);
   }
   return pdfPath;
+}
+
+export function prepareTikzSourceForCompilation(sourceAbsolutePath, outputDir) {
+  const content = fs.readFileSync(sourceAbsolutePath, "utf8");
+  const requiredPackages = [];
+  if (/\\mathbb\b/u.test(content) && !hasLatexPackage(content, ["amsfonts", "amssymb"])) {
+    requiredPackages.push("amsfonts");
+  }
+  if (requiredPackages.length === 0) {
+    return sourceAbsolutePath;
+  }
+
+  const patched = insertLatexPackages(content, requiredPackages);
+  const patchedPath = path.join(outputDir, path.basename(sourceAbsolutePath));
+  fs.writeFileSync(patchedPath, patched, "utf8");
+  return patchedPath;
+}
+
+function hasLatexPackage(content, packageNames) {
+  const wanted = new Set(packageNames);
+  for (const match of content.matchAll(/\\usepackage(?:\[[^\]]*\])?\{([^}]+)\}/gu)) {
+    for (const packageName of match[1].split(",").map((item) => item.trim())) {
+      if (wanted.has(packageName)) return true;
+    }
+  }
+  return false;
+}
+
+function insertLatexPackages(content, packageNames) {
+  const packageLines = packageNames.map((packageName) => `\\usepackage{${packageName}}`).join("\n");
+  const usePackageMatches = [...content.matchAll(/^\\usepackage(?:\[[^\]]*\])?\{[^}]+\}\s*$/gmu)];
+  if (usePackageMatches.length > 0) {
+    const last = usePackageMatches.at(-1);
+    const insertAt = last.index + last[0].length;
+    return `${content.slice(0, insertAt)}\n${packageLines}${content.slice(insertAt)}`;
+  }
+
+  const documentClassMatch = content.match(/^\\documentclass(?:\[[^\]]*\])?\{[^}]+\}\s*$/mu);
+  if (!documentClassMatch) {
+    return `${packageLines}\n${content}`;
+  }
+  const insertAt = documentClassMatch.index + documentClassMatch[0].length;
+  return `${content.slice(0, insertAt)}\n${packageLines}${content.slice(insertAt)}`;
 }
 
 function convertPdfToSizedPng(pdfPath, tempDir) {

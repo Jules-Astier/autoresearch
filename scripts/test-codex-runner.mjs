@@ -12,7 +12,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { applyWorkspaceLinks, buildAgentPrompt, collectPatch } from "./codex-runner.mjs";
+import {
+  applyWorkspaceLinks,
+  buildAgentPrompt,
+  collectPatch,
+  prepareTikzSourceForCompilation
+} from "./codex-runner.mjs";
 
 const workspacePath = mkdtempSync(join(tmpdir(), "autoresearch-runner-test-"));
 
@@ -42,9 +47,38 @@ try {
 
   assert.match(prompt, /directly use \$model-diagram-tikz/);
   assert.match(prompt, /standalone TikZ `\.tex` source/);
+  assert.match(prompt, /\\usepackage\{amsfonts\}/);
   assert.match(prompt, /create figures\/model_architecture\.tex/);
 } finally {
   rmSync(workspacePath, { recursive: true, force: true });
+}
+
+const tikzCompileTestRoot = mkdtempSync(join(tmpdir(), "autoresearch-runner-tikz-test-"));
+try {
+  const sourcePath = join(tikzCompileTestRoot, "model_architecture.tex");
+  const outputDir = join(tikzCompileTestRoot, "out");
+  mkdirSync(outputDir, { recursive: true });
+  writeFileSync(
+    sourcePath,
+    [
+      "\\documentclass[tikz,border=7pt]{standalone}",
+      "\\usepackage[T1]{fontenc}",
+      "\\begin{document}",
+      "\\begin{tikzpicture}",
+      "\\node {Latent Vector\\\\$z \\in \\mathbb{R}^{32}$};",
+      "\\end{tikzpicture}",
+      "\\end{document}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+
+  const compilePath = prepareTikzSourceForCompilation(sourcePath, outputDir);
+  assert.notEqual(compilePath, sourcePath);
+  assert.match(readFileSync(compilePath, "utf8"), /\\usepackage\{amsfonts\}/);
+  assert.doesNotMatch(readFileSync(sourcePath, "utf8"), /\\usepackage\{amsfonts\}/);
+} finally {
+  rmSync(tikzCompileTestRoot, { recursive: true, force: true });
 }
 
 const linkTestRoot = mkdtempSync(join(tmpdir(), "autoresearch-runner-links-test-"));

@@ -77,6 +77,7 @@ environment instead.
   "targetExperimentCount": 20,
   "maxConcurrentRuns": 2,
   "maxPlannedConcurrentExperiments": 3,
+  "preemptivePlanning": true,
   "editablePaths": ["src/model.ts", "config/tunable.json", "figures/model_architecture.tex"],
   "immutablePaths": ["data/**", "config/fixed.json", "figures/**/*.pdf", "figures/**/*.png"],
   "runtimeConfigPaths": ["config/tunable.json"],
@@ -142,6 +143,12 @@ benchmark process as `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
 `maxPlannedConcurrentExperiments` controls how many independent experiments the
 planner may propose in a single planning cycle. It defaults to 3 and is capped by
 the remaining target experiment count.
+
+`preemptivePlanning` controls whether a session may run its next planning cycle
+while the current planned experiments are still active. It defaults to `true`,
+which keeps the next approved batch ready as soon as active experiments finish.
+When set to `false`, planning starts only after no experiments are queued or
+running.
 
 `earlyStopping.maxPlanningCyclesWithoutAcceptedExperiments` pauses the session
 after that many consecutive completed planning cycles approve zero experiments.

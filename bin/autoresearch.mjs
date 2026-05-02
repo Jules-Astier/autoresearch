@@ -254,6 +254,7 @@ function exampleSessionContract(projectName, repoPath) {
     targetExperimentCount: 10,
     maxConcurrentRuns: 1,
     maxPlannedConcurrentExperiments: 3,
+    preemptivePlanning: true,
     editablePaths: ["src/**", "config/**"],
     immutablePaths: ["data/**", "package-lock.json"],
     runtimeConfigPaths: ["package.json", "config/**"],
@@ -663,6 +664,7 @@ function printSessionGuide(argv) {
     targetExperimentCount: positiveIntegerArg(args, "targetExperimentCount", 10),
     maxConcurrentRuns: nonNegativeIntegerArg(args, "maxConcurrentRuns", 1),
     maxPlannedConcurrentExperiments: positiveIntegerArg(args, "maxPlannedConcurrentExperiments", 3),
+    preemptivePlanning: booleanArg(args, "preemptivePlanning", true),
     editablePaths: csvArg(args, "editablePaths", ["src/**", "config/**", "figures/**/*.tex"]),
     immutablePaths: csvArg(args, "immutablePaths", ["data/**", "figures/**/*.pdf", "figures/**/*.png"]),
     runtimeConfigPaths: csvArg(args, "runtimeConfigPaths", ["config/**"]),
@@ -712,6 +714,7 @@ ${JSON.stringify(contract, null, 2)}
    benchmarkCommand: command that runs in the target repo and prints metrics.
    computeBudget.seconds: max benchmark runtime per run.
    maxPlannedConcurrentExperiments: max experiments proposed in one planning cycle.
+   preemptivePlanning: when true, plan the next batch while active runs are still finishing.
    sandbox.environment: none, docker, podman, or vercel.
    editablePaths: repo-relative files or globs workers may change.
    immutablePaths: repo-relative files or globs workers must not change.
@@ -765,6 +768,7 @@ function normalizeSessionContract(contract, sessionDir) {
       "maxPlannedConcurrentExperiments",
       3
     ),
+    preemptivePlanning: optionalBoolean(contract.preemptivePlanning, "preemptivePlanning") ?? true,
     editablePaths: requiredStringArray(contract.editablePaths, "editablePaths"),
     immutablePaths: stringArray(contract.immutablePaths, "immutablePaths"),
     runtimeConfigPaths: stringArray(contract.runtimeConfigPaths, "runtimeConfigPaths"),
@@ -1212,6 +1216,19 @@ function csvArg(args, key, fallback) {
     throw new Error(`--${kebabCase(key)} must include at least one item`);
   }
   return items;
+}
+
+function booleanArg(args, key, fallback) {
+  const value = args[key];
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`--${kebabCase(key)} requires true or false`);
+  }
+  const normalized = value.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  throw new Error(`--${kebabCase(key)} must be true or false`);
 }
 
 function metricDirectionArg(args, key, fallback) {

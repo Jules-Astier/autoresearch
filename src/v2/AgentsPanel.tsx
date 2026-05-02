@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { formatRelativeShort, formatElapsed, statusGlyph } from "./format";
+import type { ExperimentLite } from "./lineageTree";
 
 type PlanningCycle = {
   _id: string;
@@ -29,6 +30,7 @@ type AgentMessage = {
 
 type ActiveRun = {
   _id: string;
+  experimentId?: string;
   workerId: string;
   status: string;
   runNumber: number;
@@ -64,8 +66,12 @@ type Props = {
   messages: AgentMessage[];
   agentUsageSummary?: AgentUsageSummary;
   activeRun: ActiveRun;
+  activeLogs?: Array<{ _id: string; stream: string; chunk: string }>;
+  runs?: any[];
+  experiments?: ExperimentLite[];
   activeExperiment?: { ordinal: number; hypothesis: string } | null;
   workerControl: WorkerControl;
+  onSelectExperiment?: (experimentId: string) => void;
 };
 
 const AGENT_LABELS: Record<string, string> = {
@@ -98,12 +104,19 @@ export function AgentsPanel({
   messages,
   agentUsageSummary,
   activeRun,
+  activeLogs = [],
+  runs = [],
+  experiments = [],
   activeExperiment,
   workerControl,
+  onSelectExperiment,
 }: Props) {
   const activeCycle = planningCycles.find((c) => c.status === "running");
   const [expandedCycleId, setExpandedCycleId] = useState<string | undefined>(
     activeCycle?._id,
+  );
+  const [activeTab, setActiveTab] = useState<"planning" | "workers" | "memory">(
+    activeRun ? "workers" : "planning",
   );
 
   const status = useMemo(() => {
@@ -116,6 +129,14 @@ export function AgentsPanel({
       memorySystemEnabled && session?.memory?.memoryKeeper?.enabled !== false;
     const researcherActive = Boolean(
       activeCycle && researcherEnabled && !activeCycle.researcherOutput,
+    );
+    const plannerActive = Boolean(
+      activeCycle &&
+        (!researcherEnabled || activeCycle.researcherOutput) &&
+        !activeCycle.plannerOutput,
+    );
+    const reviewerActive = Boolean(
+      activeCycle && activeCycle.plannerOutput && !activeCycle.reviewerOutput,
     );
     return [
       {
@@ -134,20 +155,26 @@ export function AgentsPanel({
       {
         key: "planner",
         label: "planner",
-        active: Boolean(activeCycle),
+        active: plannerActive,
         detail: activeCycle
-          ? `cycle ${activeCycle.requestedCount} req · ${heartbeatDetail(activeCycle.lastHeartbeatAtUtc ?? activeCycle.startedAtUtc)}`
+          ? plannerActive
+            ? `planning ${activeCycle.requestedCount} · ${heartbeatDetail(activeCycle.lastHeartbeatAtUtc ?? activeCycle.startedAtUtc)}`
+            : activeCycle.plannerOutput
+              ? "plan recorded"
+              : "waiting on research"
           : `${desiredPlanners} desired`,
         usage: usageDetail(agentUsageSummary, "planner"),
       },
       {
         key: "reviewer",
         label: "reviewer",
-        active: Boolean(activeCycle),
+        active: reviewerActive,
         detail: activeCycle
-          ? activeCycle.reviewerOutput
-            ? "reviewing"
-            : "waiting on planner"
+          ? reviewerActive
+            ? "reviewing candidates"
+            : activeCycle.reviewerOutput
+              ? "review recorded"
+              : "waiting on planner"
           : "idle",
         usage: usageDetail(agentUsageSummary, "reviewer"),
       },
@@ -176,25 +203,43 @@ export function AgentsPanel({
     () => [...messages].slice(0, 30),
     [messages],
   );
+  const planningMessages = recentMessages.filter((message) =>
+    ["researcher", "planner", "reviewer"].some(
+      (source) => message.source === source || message.role === source,
+    ),
+  );
+  const workerMessages = recentMessages.filter((message) =>
+    String(message.source ?? message.role).toLowerCase().includes("worker"),
+  );
+  const memoryMessages = recentMessages.filter((message) =>
+    String(message.source ?? message.role).toLowerCase().includes("memory"),
+  );
+  const activeRuns = useMemo(() => {
+    const activeStatuses = new Set(["claimed", "running"]);
+    const fromRuns = runs.filter((run) => activeStatuses.has(String(run.status)));
+    if (fromRuns.length > 0) return fromRuns;
+    return activeRun ? [activeRun] : [];
+  }, [runs, activeRun]);
 
   return (
     <div className="agents-panel">
-      <div className="agents-roster">
-        {status.map((row) => (
-          <div
-            key={row.key}
-            className={`agent-card ${agentClass(row.key)} ${row.active ? "is-active" : ""}`}
+      <div className="agent-tabs" role="tablist" aria-label="Agent groups">
+        {[
+          { key: "planning", label: "planning", meta: activeCycle ? "active" : `${planningCycles.length} cycles` },
+          { key: "workers", label: "workers", meta: `${activeRuns.length} active` },
+          { key: "memory", label: "memory", meta: memoryMessages.length ? `${memoryMessages.length} notes` : "status" },
+        ].map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.key}
+            className={`agent-tab ${activeTab === tab.key ? "is-active" : ""}`}
+            onClick={() => setActiveTab(tab.key as "planning" | "workers" | "memory")}
           >
-            <div className="agent-card-head">
-              <span className={`agent-dot ${row.active ? "live" : ""}`} />
-              <span className="agent-label">{row.label}</span>
-              <span className="agent-status">
-                {row.active ? "active" : "idle"}
-              </span>
-            </div>
-            <div className="agent-detail">{row.detail}</div>
-            {row.usage ? <div className="agent-usage">{row.usage}</div> : null}
-          </div>
+            <span>{tab.label}</span>
+            <span>{tab.meta}</span>
+          </button>
         ))}
       </div>
 
@@ -205,6 +250,69 @@ export function AgentsPanel({
         </div>
       ) : null}
 
+      {activeTab === "planning" ? (
+        <PlanningTab
+          status={status.filter((row) => ["researcher", "planner", "reviewer"].includes(row.key))}
+          planningCycles={planningCycles}
+          planningMessages={planningMessages}
+          expandedCycleId={expandedCycleId}
+          setExpandedCycleId={setExpandedCycleId}
+        />
+      ) : null}
+
+      {activeTab === "workers" ? (
+        <WorkersTab
+          activeRuns={activeRuns}
+          activeLogs={activeLogs}
+          experiments={experiments}
+          activeExperiment={activeExperiment}
+          workerStatus={status.find((row) => row.key === "worker")}
+          workerMessages={workerMessages}
+          onSelectExperiment={onSelectExperiment}
+        />
+      ) : null}
+
+      {activeTab === "memory" ? (
+        <MemoryTab
+          memoryStatus={status.find((row) => row.key === "memory_keeper")}
+          memoryMessages={memoryMessages}
+          session={session}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function PlanningTab({
+  status,
+  planningCycles,
+  planningMessages,
+  expandedCycleId,
+  setExpandedCycleId,
+}: {
+  status: Array<{ key: string; label: string; active: boolean; detail: string; usage: string }>;
+  planningCycles: PlanningCycle[];
+  planningMessages: AgentMessage[];
+  expandedCycleId: string | undefined;
+  setExpandedCycleId: (id: string | undefined) => void;
+}) {
+  return (
+    <div className="agent-tab-panel planning-panel" role="tabpanel">
+      <div className="agents-roster planning-roster">
+        {status.map((row) => (
+          <AgentStatusCard key={row.key} row={row} />
+        ))}
+      </div>
+
+      <div className="planning-flow">
+        {["research", "plan", "review", "approved"].map((step, index) => (
+          <div key={step} className="planning-flow-step">
+            <span>{index + 1}</span>
+            <strong>{step}</strong>
+          </div>
+        ))}
+      </div>
+
       <div className="agents-cycles">
         <div className="section-head">
           <h3 className="section-subtitle">planning cycles</h3>
@@ -213,9 +321,15 @@ export function AgentsPanel({
         {planningCycles.length === 0 ? (
           <div className="tape-empty">no planning cycles yet.</div>
         ) : (
-          <ul className="cycle-list">
+          <ul className="cycle-list cycle-list-wide">
             {planningCycles.map((cycle) => {
               const expanded = expandedCycleId === cycle._id;
+              const candidateCount = candidateExperimentCount(cycle);
+              const approvedCount = cycle.approvedCount ?? approvedExperimentCount(cycle);
+              const rejectedCount =
+                candidateCount !== undefined && approvedCount !== undefined
+                  ? Math.max(0, candidateCount - approvedCount)
+                  : undefined;
               return (
                 <li
                   key={cycle._id}
@@ -239,9 +353,9 @@ export function AgentsPanel({
                     </span>
                     <span className="cycle-counts">
                       req {cycle.requestedCount}
-                      {cycle.approvedCount !== undefined
-                        ? ` · approved ${cycle.approvedCount}`
-                        : ""}
+                      {candidateCount !== undefined ? ` · cand ${candidateCount}` : ""}
+                      {approvedCount !== undefined ? ` · ok ${approvedCount}` : ""}
+                      {rejectedCount !== undefined ? ` · rej ${rejectedCount}` : ""}
                     </span>
                     <span className="cycle-worker">
                       {cycle.plannerWorkerId.slice(0, 10)}
@@ -257,31 +371,173 @@ export function AgentsPanel({
         )}
       </div>
 
-      <div className="agents-messages">
-        <div className="section-head">
-          <h3 className="section-subtitle">agent messages</h3>
-          <span className="section-aside">{messages.length} recent</span>
+      <MessageList title="planning messages" messages={planningMessages} empty="no planning messages yet." />
+    </div>
+  );
+}
+
+function WorkersTab({
+  activeRuns,
+  activeLogs,
+  experiments,
+  activeExperiment,
+  workerStatus,
+  workerMessages,
+  onSelectExperiment,
+}: {
+  activeRuns: any[];
+  activeLogs: Array<{ _id: string; stream: string; chunk: string }>;
+  experiments: ExperimentLite[];
+  activeExperiment?: { ordinal: number; hypothesis: string } | null;
+  workerStatus?: { key: string; label: string; active: boolean; detail: string; usage: string };
+  workerMessages: AgentMessage[];
+  onSelectExperiment?: (experimentId: string) => void;
+}) {
+  return (
+    <div className="agent-tab-panel workers-panel" role="tabpanel">
+      {workerStatus ? (
+        <div className="agents-roster worker-roster">
+          <AgentStatusCard row={workerStatus} />
         </div>
-        {recentMessages.length === 0 ? (
-          <div className="tape-empty">no agent messages yet.</div>
+      ) : null}
+
+      <div className="worker-run-grid">
+        {activeRuns.length === 0 ? (
+          <div className="tape-empty">no workers are active right now.</div>
         ) : (
-          <ul className="msg-list">
-            {recentMessages.map((m) => (
-              <li key={m._id} className="msg-row">
-                <div className="msg-head">
-                  <span className={`who ${agentClass(m.source ?? m.role)}`}>
-                    {agentLabel(m.source ?? m.role)}
-                  </span>
-                  <span className="msg-when">
-                    {formatRelativeShort(m.createdAtUtc)}
-                  </span>
-                </div>
-                <div className="msg-body">{truncate(m.content, 1200)}</div>
-              </li>
-            ))}
-          </ul>
+          activeRuns.map((run) => {
+            const experiment =
+              experiments.find((item) => item._id === run.experimentId) ??
+              (activeExperiment && run._id ? activeExperiment : undefined);
+            return (
+              <button
+                key={run._id}
+                type="button"
+                className="worker-run-card"
+                onClick={() => {
+                  if (run.experimentId) onSelectExperiment?.(run.experimentId);
+                }}
+              >
+                <span className="worker-run-kicker">
+                  run #{run.runNumber ?? "?"} · {run.status}
+                </span>
+                <strong>
+                  {experiment ? `#${experiment.ordinal} ${experiment.hypothesis}` : "active experiment"}
+                </strong>
+                <span>
+                  {run.workerId ? `${run.workerId} · ` : ""}
+                  {formatElapsed(run.startedAtUtc ?? run.claimedAtUtc)}
+                </span>
+              </button>
+            );
+          })
         )}
       </div>
+
+      {activeLogs.length > 0 ? (
+        <div className="worker-live-snippet">
+          <div className="section-head">
+            <h3 className="section-subtitle">latest output</h3>
+            <span className="section-aside">{activeLogs.length} chunks</span>
+          </div>
+          <pre className="tape compact">
+            {activeLogs.slice(-20).map((line) => line.chunk).join("")}
+          </pre>
+        </div>
+      ) : null}
+
+      <MessageList title="worker messages" messages={workerMessages} empty="no worker messages yet." />
+    </div>
+  );
+}
+
+function MemoryTab({
+  memoryStatus,
+  memoryMessages,
+  session,
+}: {
+  memoryStatus?: { key: string; label: string; active: boolean; detail: string; usage: string };
+  memoryMessages: AgentMessage[];
+  session: any;
+}) {
+  const memorySystemEnabled = session?.memory?.enabled !== false;
+  const researcherEnabled =
+    memorySystemEnabled && session?.memory?.researcher?.enabled !== false;
+  const memoryKeeperEnabled =
+    memorySystemEnabled && session?.memory?.memoryKeeper?.enabled !== false;
+  return (
+    <div className="agent-tab-panel memory-panel" role="tabpanel">
+      {memoryStatus ? (
+        <div className="agents-roster memory-roster">
+          <AgentStatusCard row={memoryStatus} />
+        </div>
+      ) : null}
+      <div className="memory-config-strip">
+        <span>memory {memorySystemEnabled ? "enabled" : "disabled"}</span>
+        <span>research {researcherEnabled ? "enabled" : "disabled"}</span>
+        <span>keeper {memoryKeeperEnabled ? "enabled" : "disabled"}</span>
+      </div>
+      <MessageList title="memory messages" messages={memoryMessages} empty="no memory messages yet." />
+    </div>
+  );
+}
+
+function AgentStatusCard({
+  row,
+}: {
+  row: { key: string; label: string; active: boolean; detail: string; usage: string };
+}) {
+  return (
+    <div
+      className={`agent-card ${agentClass(row.key)} ${row.active ? "is-active" : ""}`}
+    >
+      <div className="agent-card-head">
+        <span className={`agent-dot ${row.active ? "live" : ""}`} />
+        <span className="agent-label">{row.label}</span>
+        <span className="agent-status">
+          {row.active ? "active" : "idle"}
+        </span>
+      </div>
+      <div className="agent-detail">{row.detail}</div>
+      {row.usage ? <div className="agent-usage">{row.usage}</div> : null}
+    </div>
+  );
+}
+
+function MessageList({
+  title,
+  messages,
+  empty,
+}: {
+  title: string;
+  messages: AgentMessage[];
+  empty: string;
+}) {
+  return (
+    <div className="agents-messages">
+      <div className="section-head">
+        <h3 className="section-subtitle">{title}</h3>
+        <span className="section-aside">{messages.length} recent</span>
+      </div>
+      {messages.length === 0 ? (
+        <div className="tape-empty">{empty}</div>
+      ) : (
+        <ul className="msg-list">
+          {messages.map((m) => (
+            <li key={m._id} className="msg-row">
+              <div className="msg-head">
+                <span className={`who ${agentClass(m.source ?? m.role)}`}>
+                  {agentLabel(m.source ?? m.role)}
+                </span>
+                <span className="msg-when">
+                  {formatRelativeShort(m.createdAtUtc)}
+                </span>
+              </div>
+              <div className="msg-body">{truncate(m.content, 1200)}</div>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -400,6 +656,40 @@ function formatTokens(value: number | undefined): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
   if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
   return String(tokens);
+}
+
+function candidateExperimentCount(cycle: PlanningCycle): number | undefined {
+  return countJsonArray(cycle.plannerOutput, ["experiments", "candidates", "candidateExperiments"]);
+}
+
+function approvedExperimentCount(cycle: PlanningCycle): number | undefined {
+  return countJsonArray(cycle.reviewerOutput, ["approvedExperiments", "approved", "experiments"]);
+}
+
+function countJsonArray(text: string | undefined, keys: string[]): number | undefined {
+  if (!text) return undefined;
+  const parsed = parseLooseJson(text);
+  if (!parsed || typeof parsed !== "object") return undefined;
+  for (const key of keys) {
+    const value = (parsed as Record<string, unknown>)[key];
+    if (Array.isArray(value)) return value.length;
+  }
+  return undefined;
+}
+
+function parseLooseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const start = text.indexOf("{");
+    const end = text.lastIndexOf("}");
+    if (start < 0 || end <= start) return undefined;
+    try {
+      return JSON.parse(text.slice(start, end + 1));
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 function truncate(text: string, max: number): string {

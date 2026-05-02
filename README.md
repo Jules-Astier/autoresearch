@@ -105,6 +105,7 @@ The required runtime fields are:
 - `targetExperimentCount`
 - `maxConcurrentRuns`
 - `maxPlannedConcurrentExperiments` (optional, defaults to 3)
+- `preemptivePlanning` (optional, defaults to true)
 - `editablePaths`
 - `metricContract.metrics`
 
@@ -133,6 +134,8 @@ it for the 5 minute default, or set `"computeBudget": { "seconds": 600 }`. The
 benchmark process also receives `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
 
 `maxPlannedConcurrentExperiments` controls planner batch size for that session.
+`preemptivePlanning` lets the planner prepare the next batch while current runs
+are still active, so runners do not wait for planning after a batch finishes.
 Set `earlyStopping.enabled: true` with
 `maxPlanningCyclesWithoutAcceptedExperiments` to pause a session after repeated
 planning cycles approve no experiments.

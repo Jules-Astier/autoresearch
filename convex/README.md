@@ -62,6 +62,9 @@ under `~/.autoresearch/runner`.
 counts. Session contracts can override planner batch size with
 `maxPlannedConcurrentExperiments`; the browser writes the selected session value
 when the max-plan control changes.
+Sessions default `preemptivePlanning` to true, allowing the next planning cycle
+to run while active experiments are still finishing as long as no queued batch
+already exists.
 
 The runner records a patch after the agent edits and before benchmarks run. A run can
 complete only when it references an accepted patch, so metrics are always linked

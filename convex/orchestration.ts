@@ -1,4 +1,5 @@
 import { mutation, query } from "./_generated/server";
+import type { MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { v } from "convex/values";
 import { promotionMilestoneIdsForSession } from "./promotionHistory";
@@ -39,6 +40,7 @@ const createSessionArgs = {
   targetExperimentCount: v.float64(),
   maxConcurrentRuns: v.float64(),
   maxPlannedConcurrentExperiments: v.optional(v.float64()),
+  preemptivePlanning: v.optional(v.boolean()),
   editablePaths: v.array(v.string()),
   immutablePaths: v.array(v.string()),
   runtimeConfigPaths: v.optional(v.array(v.string())),
@@ -280,6 +282,11 @@ export const createResearchSession = mutation({
       1,
       64,
     );
+    const preemptivePlanning = normalizeOptionalBoolean(
+      args.preemptivePlanning,
+      "preemptivePlanning",
+      true,
+    );
     const sandbox = normalizeSandboxConfig(args.sandbox);
     const existing = await ctx.db
       .query("researchSessions")
@@ -301,6 +308,7 @@ export const createResearchSession = mutation({
       targetExperimentCount: args.targetExperimentCount,
       maxConcurrentRuns: args.maxConcurrentRuns,
       maxPlannedConcurrentExperiments,
+      preemptivePlanning,
       completedExperimentCount: 0,
       activeRunCount: 0,
       nextExperimentOrdinal: 1,
@@ -323,7 +331,7 @@ export const createResearchSession = mutation({
       sessionId,
       type: "session.created",
       message: `Created session ${args.slug}`,
-      payload: { targetExperimentCount: args.targetExperimentCount, computeBudget, maxPlannedConcurrentExperiments, sandbox },
+      payload: { targetExperimentCount: args.targetExperimentCount, computeBudget, maxPlannedConcurrentExperiments, preemptivePlanning, sandbox },
     });
     return sessionId;
   },
@@ -341,6 +349,11 @@ export const registerResearchSession = mutation({
       "maxPlannedConcurrentExperiments",
       1,
       64,
+    );
+    const preemptivePlanning = normalizeOptionalBoolean(
+      args.preemptivePlanning,
+      "preemptivePlanning",
+      true,
     );
     const sandbox = normalizeSandboxConfig(args.sandbox);
     const existing = await ctx.db
@@ -361,6 +374,7 @@ export const registerResearchSession = mutation({
         targetExperimentCount: args.targetExperimentCount,
         maxConcurrentRuns: args.maxConcurrentRuns,
         maxPlannedConcurrentExperiments,
+        preemptivePlanning,
         completedExperimentCount: 0,
         activeRunCount: 0,
         nextExperimentOrdinal: 1,
@@ -383,7 +397,7 @@ export const registerResearchSession = mutation({
         sessionId,
         type: "session.registered",
         message: `Registered session ${args.slug}`,
-        payload: { targetExperimentCount: args.targetExperimentCount, computeBudget, maxPlannedConcurrentExperiments, sandbox },
+        payload: { targetExperimentCount: args.targetExperimentCount, computeBudget, maxPlannedConcurrentExperiments, preemptivePlanning, sandbox },
       });
       return sessionId;
     }
@@ -398,6 +412,7 @@ export const registerResearchSession = mutation({
       targetExperimentCount: args.targetExperimentCount,
       maxConcurrentRuns: args.maxConcurrentRuns,
       maxPlannedConcurrentExperiments,
+      preemptivePlanning,
       editablePaths: args.editablePaths,
       immutablePaths: args.immutablePaths,
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
@@ -420,6 +435,7 @@ export const registerResearchSession = mutation({
         targetExperimentCount: args.targetExperimentCount,
         maxConcurrentRuns: args.maxConcurrentRuns,
         maxPlannedConcurrentExperiments,
+        preemptivePlanning,
         sandbox,
       },
     });
@@ -433,6 +449,7 @@ export const updateResearchSessionContract = mutation({
     benchmarkCommand: v.optional(v.string()),
     computeBudget: v.optional(v.any()),
     maxPlannedConcurrentExperiments: v.optional(v.float64()),
+    preemptivePlanning: v.optional(v.boolean()),
     editablePaths: v.optional(v.array(v.string())),
     immutablePaths: v.optional(v.array(v.string())),
     runtimeConfigPaths: v.optional(v.array(v.string())),
@@ -460,6 +477,12 @@ export const updateResearchSessionContract = mutation({
         "maxPlannedConcurrentExperiments",
         1,
         64,
+      );
+    if (args.preemptivePlanning !== undefined)
+      patch.preemptivePlanning = normalizeOptionalBoolean(
+        args.preemptivePlanning,
+        "preemptivePlanning",
+        true,
       );
     if (args.editablePaths !== undefined)
       patch.editablePaths = args.editablePaths;
@@ -524,6 +547,7 @@ export const updateResearchSessionContract = mutation({
       payload: {
         computeBudget: args.computeBudget,
         maxPlannedConcurrentExperiments: args.maxPlannedConcurrentExperiments,
+        preemptivePlanning: args.preemptivePlanning,
         metricContract: normalizedMetricContract,
         bestExperimentId: patch.bestExperimentId,
         editablePaths: args.editablePaths,
@@ -540,6 +564,49 @@ export const removeResearchSession = mutation({
   handler: async (ctx, { sessionId }) => {
     await mustGetSession(ctx, sessionId);
 
+    const deleted = await deleteSessionRecords(ctx, sessionId);
+
+    await ctx.db.delete(sessionId);
+
+    return { deleted };
+  },
+});
+
+export const restartResearchSession = mutation({
+  args: { sessionId: v.id("researchSessions") },
+  handler: async (ctx, { sessionId }) => {
+    await mustGetSession(ctx, sessionId);
+
+    const deleted = await deleteSessionRecords(ctx, sessionId);
+    const now = nowUtc();
+
+    await ctx.db.patch(sessionId, {
+      status: "running",
+      completedExperimentCount: 0,
+      activeRunCount: 0,
+      nextExperimentOrdinal: 1,
+      resumeCount: 0,
+      rollbackCount: 0,
+      bestExperimentId: undefined,
+      bestScore: undefined,
+      bestMetrics: undefined,
+      basePatchId: undefined,
+      rollbackTargetExperimentId: undefined,
+      rolledBackAtUtc: undefined,
+      planningRetryCount: 0,
+      planningRetryAfterUtc: undefined,
+      stoppedReason: "",
+      updatedAtUtc: now,
+    });
+
+    return { deleted };
+  },
+});
+
+async function deleteSessionRecords(
+  ctx: MutationCtx,
+  sessionId: Id<"researchSessions">,
+) {
     const runLogs = await ctx.db
       .query("researchRunLogs")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
@@ -606,25 +673,20 @@ export const removeResearchSession = mutation({
       .collect();
     for (const row of experiments) await ctx.db.delete(row._id);
 
-    await ctx.db.delete(sessionId);
-
     return {
-      deleted: {
-        runLogs: runLogs.length,
-        agentMessages: agentMessages.length,
-        agentUsage: agentUsage.length,
-        events: events.length,
-        memoryNotes: memoryNotes.length,
-        rollbacks: rollbacks.length,
-        planningCycles: planningCycles.length,
-        artifacts: artifacts.length,
-        patches: patches.length,
-        runs: runs.length,
-        experiments: experiments.length,
-      },
+      runLogs: runLogs.length,
+      agentMessages: agentMessages.length,
+      agentUsage: agentUsage.length,
+      events: events.length,
+      memoryNotes: memoryNotes.length,
+      rollbacks: rollbacks.length,
+      planningCycles: planningCycles.length,
+      artifacts: artifacts.length,
+      patches: patches.length,
+      runs: runs.length,
+      experiments: experiments.length,
     };
-  },
-});
+}
 
 export const enqueueExperiment = mutation({
   args: {
@@ -723,7 +785,10 @@ export const claimPlanningCycle = mutation({
         q.eq("sessionId", session._id).eq("status", "queued"),
       )
       .collect();
-    if (queued.length > 0 || session.activeRunCount > 0) {
+    if (
+      queued.length > 0 ||
+      (session.activeRunCount > 0 && !isPreemptivePlanningEnabled(session))
+    ) {
       return null;
     }
 
@@ -2340,6 +2405,12 @@ async function firstRunnableSession(
         q.eq("sessionId", session._id).eq("status", "queued"),
       )
       .collect();
+    if (
+      queued.length > 0 ||
+      (session.activeRunCount > 0 && !isPreemptivePlanningEnabled(session))
+    ) {
+      continue;
+    }
     const remaining =
       session.targetExperimentCount -
       session.completedExperimentCount -
@@ -3051,6 +3122,23 @@ function requireBoolean(value: any, field: string): boolean {
     throw new Error(`${field} must be a boolean`);
   }
   return value;
+}
+
+function normalizeOptionalBoolean(
+  value: any,
+  field: string,
+  fallback: boolean,
+): boolean {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+  return requireBoolean(value, field);
+}
+
+function isPreemptivePlanningEnabled(
+  session: Doc<"researchSessions">,
+): boolean {
+  return session.preemptivePlanning !== false;
 }
 
 function normalizeSandboxConfig(value: any): any {

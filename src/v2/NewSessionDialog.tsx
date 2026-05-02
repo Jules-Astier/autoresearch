@@ -10,6 +10,7 @@ export type NewSessionPayload = {
   targetExperimentCount: number;
   maxConcurrentRuns: number;
   maxPlannedConcurrentExperiments?: number;
+  preemptivePlanning?: boolean;
   editablePaths: string[];
   immutablePaths: string[];
   metricContract: {
@@ -221,7 +222,9 @@ function ContractPreview({ payload }: { payload: NewSessionPayload }) {
           label="experiments"
           value={`${payload.targetExperimentCount} target · ${payload.maxConcurrentRuns} runner${
             payload.maxConcurrentRuns === 1 ? "" : "s"
-          } · ${payload.maxPlannedConcurrentExperiments ?? 3} max plan`}
+          } · ${payload.maxPlannedConcurrentExperiments ?? 3} max plan · ${
+            payload.preemptivePlanning === false ? "serial planning" : "preemptive planning"
+          }`}
         />
         <ContractItem label="sandbox" value={formatSandboxEnvironment(payload.sandbox)} />
         <ContractItem

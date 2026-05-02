@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "convex/react";
-import { Trash2 } from "lucide-react";
+import { RotateCcw, Trash2 } from "lucide-react";
 import { api } from "../../convex/_generated/api";
 import { Header } from "./Header";
 import { SessionTape } from "./SessionTape";
@@ -8,15 +8,16 @@ import { Frontier } from "./Frontier";
 import { HypothesisNow } from "./HypothesisNow";
 import { Lineage } from "./Lineage";
 import { Ledger } from "./Ledger";
-import { LiveTape } from "./LiveTape";
 import { AgentsPanel } from "./AgentsPanel";
 import { NotesPanel } from "./NotesPanel";
 import { NodeDetail } from "./NodeDetail";
 import { DiffSheet } from "./DiffSheet";
 import { Toolbar } from "./Toolbar";
 import { MetricPriorityPanel } from "./MetricPriorityPanel";
+import { formatMetricValue, topObjectiveMetric } from "./format";
 import { NewSessionDialog, type NewSessionPayload } from "./NewSessionDialog";
 import { RemoveSessionDialog } from "./RemoveSessionDialog";
+import { RestartSessionDialog } from "./RestartSessionDialog";
 import { buildLineage, type ExperimentLite, type RollbackLite } from "./lineageTree";
 import "./lab.css";
 
@@ -34,12 +35,14 @@ export function LabLedger() {
   const updateSessionContract = useMutation(api.orchestration.updateResearchSessionContract);
   const registerSession = useMutation(api.orchestration.registerResearchSession);
   const removeSession = useMutation(api.orchestration.removeResearchSession);
+  const restartSession = useMutation(api.orchestration.restartResearchSession);
 
   const [selectedSessionId, setSelectedSessionId] = useState<string>();
   const [selectedExperimentId, setSelectedExperimentId] = useState<string | undefined>();
   const [diffPatchId, setDiffPatchId] = useState<string | undefined>();
   const [isNewSessionOpen, setIsNewSessionOpen] = useState(false);
   const [isRemoveSessionOpen, setIsRemoveSessionOpen] = useState(false);
+  const [isRestartSessionOpen, setIsRestartSessionOpen] = useState(false);
 
   useEffect(() => {
     if (!selectedSessionId && sessions && sessions.length > 0) {
@@ -102,6 +105,7 @@ export function LabLedger() {
   const bestExperiment = session?.bestExperimentId
     ? experiments.find((experiment) => experiment._id === session.bestExperimentId)
     : undefined;
+  const topObjective = topObjectiveMetric(session?.metricContract);
 
   const lastUpdate = session?.updatedAtUtc ?? session?.heartbeatAtUtc;
   const isLive =
@@ -136,84 +140,120 @@ export function LabLedger() {
         ) : (
           <div className="canvas">
             <main>
-              <Toolbar
-                session={session}
-                workerControl={workerControl}
-                activePlanningCycle={activePlanningCycle}
-                onPause={() => pauseSession({ sessionId: session._id })}
-                onResume={() => resumeSession({ sessionId: session._id })}
-                onStop={() =>
-                  stopSession({ sessionId: session._id, reason: "manual_stop" })
-                }
-                onRequestExperiments={(count) =>
-                  void requestMore({ sessionId: session._id, count })
-                }
-                onSetRunners={(count) => {
-                  void setWorkerControl({ desiredRunnerCount: count });
-                  if (count > 0) {
+              <section className="progress-stage" aria-label="Current progress">
+                <MiniStatusBar
+                  session={session}
+                  isLive={isLive}
+                  topObjective={topObjective}
+                  bestValue={topObjective ? session.bestMetrics?.[topObjective] : undefined}
+                  activePlanningCycle={activePlanningCycle}
+                  activeExperiment={activeExperiment}
+                  workerControl={workerControl}
+                  lastUpdate={lastUpdate}
+                />
+                <Frontier
+                  session={session}
+                  experiments={experiments}
+                  onSelectExperiment={setSelectedExperimentId}
+                />
+                <HypothesisNow activeRun={activeRun} experiment={activeExperiment} />
+              </section>
+
+              <section className="session-config" aria-label="Session config">
+                <Toolbar
+                  session={session}
+                  workerControl={workerControl}
+                  activePlanningCycle={activePlanningCycle}
+                  onPause={() => pauseSession({ sessionId: session._id })}
+                  onResume={() => resumeSession({ sessionId: session._id })}
+                  onStop={() =>
+                    stopSession({ sessionId: session._id, reason: "manual_stop" })
+                  }
+                  onRequestExperiments={(count) =>
+                    void requestMore({ sessionId: session._id, count })
+                  }
+                  onSetRunners={(count) => {
+                    void setWorkerControl({ desiredRunnerCount: count });
+                    if (count > 0) {
+                      void setSessionConcurrency({
+                        sessionId: session._id,
+                        maxConcurrentRuns: count,
+                      });
+                    }
+                  }}
+                  onSetPlannerCount={(count) => {
+                    void setWorkerControl({ desiredPlannerCount: count });
                     void setSessionConcurrency({
                       sessionId: session._id,
-                      maxConcurrentRuns: count,
+                      maxPlannedConcurrentExperiments: count,
                     });
+                  }}
+                  onSetComputeBudgetSeconds={(seconds) => {
+                    void updateSessionContract({
+                      sessionId: session._id,
+                      computeBudget: { ...(session.computeBudget ?? {}), seconds },
+                    });
+                  }}
+                  onSetResearcherEnabled={(enabled) => {
+                    void updateSessionContract({
+                      sessionId: session._id,
+                      memory: {
+                        ...(session.memory ?? {}),
+                        enabled: true,
+                        researcher: {
+                          ...(session.memory?.researcher ?? {}),
+                          enabled,
+                        },
+                      },
+                    });
+                  }}
+                  onSetMemoryKeeperEnabled={(enabled) => {
+                    void updateSessionContract({
+                      sessionId: session._id,
+                      memory: {
+                        ...(session.memory ?? {}),
+                        enabled: true,
+                        memoryKeeper: {
+                          ...(session.memory?.memoryKeeper ?? {}),
+                          enabled,
+                        },
+                      },
+                    });
+                  }}
+                />
+                <MetricPriorityPanel
+                  session={session}
+                  bestExperimentOrdinal={bestExperiment?.ordinal}
+                  onReorder={(metricContract) =>
+                    updateSessionContract({
+                      sessionId: session._id,
+                      metricContract,
+                    })
                   }
-                }}
-                onSetPlannerCount={(count) => {
-                  void setWorkerControl({ desiredPlannerCount: count });
-                  void setSessionConcurrency({
-                    sessionId: session._id,
-                    maxPlannedConcurrentExperiments: count,
-                  });
-                }}
-                onSetComputeBudgetSeconds={(seconds) => {
-                  void updateSessionContract({
-                    sessionId: session._id,
-                    computeBudget: { ...(session.computeBudget ?? {}), seconds },
-                  });
-                }}
-                onSetResearcherEnabled={(enabled) => {
-                  void updateSessionContract({
-                    sessionId: session._id,
-                    memory: {
-                      ...(session.memory ?? {}),
-                      enabled: true,
-                      researcher: {
-                        ...(session.memory?.researcher ?? {}),
-                        enabled,
-                      },
-                    },
-                  });
-                }}
-                onSetMemoryKeeperEnabled={(enabled) => {
-                  void updateSessionContract({
-                    sessionId: session._id,
-                    memory: {
-                      ...(session.memory ?? {}),
-                      enabled: true,
-                      memoryKeeper: {
-                        ...(session.memory?.memoryKeeper ?? {}),
-                        enabled,
-                      },
-                    },
-                  });
-                }}
-              />
+                />
+              </section>
 
-              <Frontier
-                session={session}
-                experiments={experiments}
-                onSelectExperiment={setSelectedExperimentId}
-              />
-              <MetricPriorityPanel
-                session={session}
-                bestExperimentOrdinal={bestExperiment?.ordinal}
-                onReorder={(metricContract) =>
-                  updateSessionContract({
-                    sessionId: session._id,
-                    metricContract,
-                  })
-                }
-              />
-              <HypothesisNow activeRun={activeRun} experiment={activeExperiment} />
+              <section className="section agents-section">
+                <div className="section-head">
+                  <h2 className="section-title">agents</h2>
+                  <span className="section-aside">
+                    {planningCycles.length} cycles · {messages.length} messages
+                  </span>
+                </div>
+                <AgentsPanel
+                  session={session}
+                  planningCycles={planningCycles}
+                  messages={messages}
+                  agentUsageSummary={agentUsageSummary}
+                  activeRun={activeRun}
+                  activeLogs={activeLogs}
+                  runs={runs}
+                  experiments={experiments}
+                  activeExperiment={activeExperiment}
+                  workerControl={workerControl}
+                  onSelectExperiment={setSelectedExperimentId}
+                />
+              </section>
 
               <section className="section">
                 <div className="section-head">
@@ -257,44 +297,33 @@ export function LabLedger() {
                 <NotesPanel notes={memoryNotes} memoryConfig={session.memory} />
               </section>
 
-              <section className="section danger-zone" aria-label="Session removal">
+              <section className="section danger-zone" aria-label="Session reset">
                 <div>
-                  <h2 className="section-title">session removal</h2>
+                  <h2 className="section-title">session reset</h2>
                   <p>
-                    Remove this session and its recorded experiments from the ledger.
+                    Restart this session from scratch or remove it from the ledger.
                   </p>
                 </div>
-                <button
-                  type="button"
-                  className="btn btn-warn"
-                  onClick={() => setIsRemoveSessionOpen(true)}
-                >
-                  <Trash2 size={13} />
-                  remove session
-                </button>
+                <div className="danger-actions">
+                  <button
+                    type="button"
+                    className="btn btn-warn"
+                    onClick={() => setIsRestartSessionOpen(true)}
+                  >
+                    <RotateCcw size={13} />
+                    restart session
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-warn"
+                    onClick={() => setIsRemoveSessionOpen(true)}
+                  >
+                    <Trash2 size={13} />
+                    remove session
+                  </button>
+                </div>
               </section>
             </main>
-
-            <aside className="rail">
-              <LiveTape logs={activeLogs} activeRun={activeRun} />
-              <div className="rail-card">
-                <div className="rail-head">
-                  <span className="rail-title">agents</span>
-                  <span className="rail-meta">
-                    {planningCycles.length} cycles · {messages.length} messages
-                  </span>
-                </div>
-                <AgentsPanel
-                  session={session}
-                  planningCycles={planningCycles}
-                  messages={messages}
-                  agentUsageSummary={agentUsageSummary}
-                  activeRun={activeRun}
-                  activeExperiment={activeExperiment}
-                  workerControl={workerControl}
-                />
-              </div>
-            </aside>
           </div>
         )}
       </div>
@@ -350,6 +379,66 @@ export function LabLedger() {
             setDiffPatchId(undefined);
           }}
         />
+      ) : null}
+
+      {isRestartSessionOpen && session ? (
+        <RestartSessionDialog
+          session={session}
+          onClose={() => setIsRestartSessionOpen(false)}
+          onRestart={async () => {
+            await restartSession({ sessionId: session._id });
+            setSelectedExperimentId(undefined);
+            setDiffPatchId(undefined);
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function MiniStatusBar({
+  session,
+  isLive,
+  topObjective,
+  bestValue,
+  activePlanningCycle,
+  activeExperiment,
+  workerControl,
+  lastUpdate,
+}: {
+  session: any;
+  isLive: boolean;
+  topObjective: string;
+  bestValue: number | undefined;
+  activePlanningCycle: any;
+  activeExperiment?: { ordinal: number; hypothesis: string } | null;
+  workerControl: any;
+  lastUpdate?: string;
+}) {
+  return (
+    <div className="mini-status-bar" aria-label="Session status">
+      <span className={`mini-status-dot ${isLive ? "live" : ""}`} />
+      <span className="mini-status-item strong">{session.status}</span>
+      <span className="mini-status-item">
+        {session.completedExperimentCount ?? 0}/{session.targetExperimentCount ?? 0} done
+      </span>
+      <span className="mini-status-item">{session.activeRunCount ?? 0} active</span>
+      <span className="mini-status-item">
+        {topObjective ? `${topObjective} ${formatMetricValue(bestValue)}` : "no objective"}
+      </span>
+      <span className="mini-status-item">
+        {workerControl?.desiredRunnerCount ?? session.maxConcurrentRuns ?? 0} runners
+      </span>
+      {activePlanningCycle ? (
+        <span className="mini-status-item">planning {activePlanningCycle.requestedCount}</span>
+      ) : null}
+      {activeExperiment ? (
+        <span className="mini-status-item">working #{activeExperiment.ordinal}</span>
+      ) : null}
+      {lastUpdate ? (
+        <span className="mini-status-item muted">
+          updated {new Date(lastUpdate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        </span>
       ) : null}
     </div>
   );

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ListChecks, Maximize2, Minus, Plus } from "lucide-react";
+import { ListChecks, Minus, Plus, ScanSearch } from "lucide-react";
 import {
   formatMetricValue,
   formatDelta,
@@ -625,7 +625,7 @@ function Chart({
           <Minus size={14} />
         </button>
         <button type="button" className="lineage-ctrl" onClick={zoomReset} title="Reset density">
-          <Maximize2 size={14} />
+          <ScanSearch size={14} />
         </button>
         <button
           type="button"
