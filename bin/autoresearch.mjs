@@ -7,6 +7,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const STACK_STATE_PATH = path.join(ROOT, ".autoresearch", "runtime", "stack.json");
 const DEFAULT_COMPUTE_BUDGET_SECONDS = 300;
 const AGENT_ROLE_CONFIG_KEYS = ["researcher", "planner", "reviewer", "worker", "memoryKeeper"];
 
@@ -25,11 +26,29 @@ async function main() {
     return;
   }
   if (command === "run") {
-    await runSession(argv);
+    if (argv.includes("--help") || argv.includes("-h")) {
+      printRunHelp();
+      return;
+    }
+    validateRunStackArgs(argv);
+    await runScript("dev-stack.mjs", ["--frontend-mode", "preview", ...argv]);
+    return;
+  }
+  if (command === "restart") {
+    if (argv.includes("--help") || argv.includes("-h")) {
+      printRestartHelp();
+      return;
+    }
+    validateRunStackArgs(argv);
+    await restartRunStack(argv);
     return;
   }
   if (command === "session" || command === "sessions") {
     await runSessionCommand(argv);
+    return;
+  }
+  if (command === "search" || command === "results") {
+    await searchSessionResults(argv);
     return;
   }
   if (command === "session-guide" || command === "guide-session") {
@@ -387,6 +406,141 @@ function textBlock(lines) {
   return `${lines.join("\n")}\n`;
 }
 
+function validateRunStackArgs(argv) {
+  const optionsWithValues = new Set([
+    "--convex-url",
+    "--frontend-port",
+    "--port",
+    "--worker-poll-ms"
+  ]);
+  const flagOptions = new Set(["--no-reuse", "--no-workers"]);
+  for (let index = 0; index < argv.length; index += 1) {
+    const item = argv[index];
+    if (optionsWithValues.has(item)) {
+      if (!argv[index + 1] || argv[index + 1].startsWith("--")) {
+        throw new Error(`${item} requires a value`);
+      }
+      index += 1;
+      continue;
+    }
+    if (flagOptions.has(item)) {
+      continue;
+    }
+    throw new Error(`Unknown run option: ${item}. Use \`autoresearch session add ${item}\` to add a session.`);
+  }
+}
+
+async function restartRunStack(argv) {
+  const pids = findRunningRunStackPids();
+  if (pids.length === 0) {
+    console.log("No running autoresearch run stack found; starting a new one.");
+  } else {
+    console.log(`Stopping autoresearch run stack process${pids.length === 1 ? "" : "es"}: ${pids.join(", ")}`);
+    for (const pid of pids) {
+      signalProcess(pid, "SIGINT");
+    }
+    const stopped = await waitForProcessesToExit(pids, 10000);
+    const remaining = pids.filter((pid) => !stopped.has(pid));
+    for (const pid of remaining) {
+      signalProcess(pid, "SIGTERM");
+    }
+    if (remaining.length > 0) {
+      await waitForProcessesToExit(remaining, 5000);
+    }
+    const stillRunning = pids.filter(isProcessAlive);
+    if (stillRunning.length > 0) {
+      throw new Error(`Unable to stop autoresearch run stack process${stillRunning.length === 1 ? "" : "es"}: ${stillRunning.join(", ")}`);
+    }
+  }
+  await runScript("dev-stack.mjs", ["--frontend-mode", "preview", ...argv]);
+}
+
+function findRunningRunStackPids() {
+  const pids = new Set();
+  const state = readStackState();
+  if (state?.root === ROOT && state.frontendMode === "preview" && Number.isInteger(state.pid)) {
+    if (isProcessAlive(state.pid)) {
+      pids.add(state.pid);
+    }
+  }
+  for (const pid of findRunStackPidsFromProcessList()) {
+    pids.add(pid);
+  }
+  return [...pids].filter((pid) => pid !== process.pid).sort((a, b) => a - b);
+}
+
+function readStackState() {
+  try {
+    return JSON.parse(fs.readFileSync(STACK_STATE_PATH, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function findRunStackPidsFromProcessList() {
+  if (process.platform === "win32") {
+    return [];
+  }
+  const result = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
+  if (result.status !== 0 || !result.stdout) {
+    return [];
+  }
+  const stackScript = path.join(ROOT, "scripts", "dev-stack.mjs");
+  const pids = [];
+  for (const line of result.stdout.split(/\r?\n/u)) {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/u);
+    if (!match) {
+      continue;
+    }
+    const pid = Number(match[1]);
+    const command = match[2];
+    if (pid !== process.pid && command.includes(stackScript) && command.includes("--frontend-mode preview")) {
+      pids.push(pid);
+    }
+  }
+  return pids;
+}
+
+function signalProcess(pid, signal) {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if (error?.code !== "ESRCH") {
+      throw error;
+    }
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForProcessesToExit(pids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  const stopped = new Set();
+  while (Date.now() < deadline) {
+    for (const pid of pids) {
+      if (!stopped.has(pid) && !isProcessAlive(pid)) {
+        stopped.add(pid);
+      }
+    }
+    if (stopped.size === pids.length) {
+      return stopped;
+    }
+    await sleep(100);
+  }
+  return stopped;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function runSessionCommand(argv) {
   const [subcommand, ...subargv] = argv;
   if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
@@ -399,6 +553,10 @@ async function runSessionCommand(argv) {
   }
   if (subcommand === "add" || subcommand === "register") {
     await registerSession(subargv);
+    return;
+  }
+  if (subcommand === "search" || subcommand === "results") {
+    await searchSessionResults(subargv);
     return;
   }
   throw new Error(`Unknown session command: ${subcommand}`);
@@ -429,10 +587,7 @@ async function registerSession(argv) {
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
-  const convexUrl = args.convexUrl ?? process.env.CONVEX_URL ?? process.env.VITE_CONVEX_URL ?? loadEnvFile(path.join(ROOT, ".env.local")).VITE_CONVEX_URL;
-  if (!convexUrl) {
-    throw new Error("Missing Convex URL. Run `autoresearch dev` or pass --convex-url.");
-  }
+  const convexUrl = resolveConvexUrl(args);
 
   const client = new ConvexHttpClient(convexUrl);
   const sessionId = await client.mutation(api.orchestration.registerResearchSession, payload);
@@ -440,167 +595,38 @@ async function registerSession(argv) {
   console.log(`Session id: ${sessionId}`);
 }
 
-async function runSession(argv) {
+async function searchSessionResults(argv) {
   const args = parseArgs(argv);
   if (args.help || args.h) {
-    printRunHelp();
+    printSessionSearchHelp();
     return;
   }
-  const sessionDirArg = args._[0];
-  if (!sessionDirArg || args._.length > 1) {
-    throw new Error("Usage: autoresearch run <session-dir> [run options]");
+  const session = stringArg(args, "session", args._[0]);
+  if (!session) {
+    throw new Error("Usage: autoresearch session search <session-slug-or-id> [query] [search options]");
   }
-
-  const { sessionDir, payload } = loadSessionPayload(sessionDirArg);
-  const runners = nonNegativeIntegerArg(args, "runners", payload.maxConcurrentRuns || 1);
-  const planners = positiveIntegerArg(
-    args,
-    "planners",
-    payload.maxPlannedConcurrentExperiments || 3
-  );
-
-  if (args.dryRun) {
-    console.log(JSON.stringify({ sessionDir, session: payload, runners, planners }, null, 2));
-    return;
-  }
-
-  if (args.stack === false || args.noStack) {
-    const convexUrl = resolveConvexUrl(args);
-    const sessionId = await registerAndStartSession({ payload, convexUrl, runners, planners });
-    console.log(`Running ${payload.slug} at ${convexUrl}`);
-    console.log(`Session id: ${sessionId}`);
-    console.log(`Desired runners: ${runners}`);
-    console.log(`Planner batch size: ${planners}`);
-    return;
-  }
-
-  await runStackAndSession({ args, payload, runners, planners });
-}
-
-function loadSessionPayload(sessionDirArg) {
-  const sessionDir = path.resolve(process.cwd(), sessionDirArg);
-  const contractPath = path.join(sessionDir, "session.json");
-  if (!fs.existsSync(contractPath)) {
-    throw new Error(`Missing session.json: ${contractPath}`);
-  }
-  const contract = JSON.parse(fs.readFileSync(contractPath, "utf8"));
-  return { sessionDir, payload: normalizeSessionContract(contract, sessionDir) };
-}
-
-async function registerAndStartSession({ payload, convexUrl, runners, planners }) {
+  const text = args._.slice(args._[0] === session ? 1 : 0).join(" ").trim();
+  const metricFilters = parseMetricFilters(args.metric);
+  const convexUrl = resolveConvexUrl(args);
   const client = new ConvexHttpClient(convexUrl);
-  const sessionId = await client.mutation(api.orchestration.registerResearchSession, payload);
-  await Promise.all([
-    client.mutation(api.orchestration.resumeSession, {
-      sessionId,
-      targetExperimentCount: payload.targetExperimentCount
-    }),
-    client.mutation(api.orchestration.setSessionConcurrency, {
-      sessionId,
-      maxConcurrentRuns: Math.max(1, runners),
-      maxPlannedConcurrentExperiments: planners
-    }),
-    client.mutation(api.orchestration.setWorkerControl, {
-      desiredRunnerCount: runners,
-      desiredPlannerCount: planners
-    })
-  ]);
-  return sessionId;
-}
-
-async function runStackAndSession({ args, payload, runners, planners }) {
-  const stackArgs = [];
-  if (args.convexUrl) stackArgs.push("--convex-url", String(args.convexUrl));
-  if (args.frontendPort) stackArgs.push("--frontend-port", String(args.frontendPort));
-  if (args.port && !args.frontendPort) stackArgs.push("--frontend-port", String(args.port));
-  if (args.noReuse) stackArgs.push("--no-reuse");
-  if (args.noWorkers) stackArgs.push("--no-workers");
-  if (args.workerPollMs) stackArgs.push("--worker-poll-ms", String(args.workerPollMs));
-
-  await new Promise((resolve, reject) => {
-    let registered = false;
-    let settled = false;
-    const child = spawn(process.execPath, [path.join(ROOT, "scripts", "dev-stack.mjs"), ...stackArgs], {
-      cwd: ROOT,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-
-    const finish = (error) => {
-      if (settled) return;
-      settled = true;
-      if (error) reject(error);
-      else resolve();
-    };
-    const stop = () => {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGINT");
-      }
-    };
-
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-    child.once("error", finish);
-    child.once("exit", (code) => {
-      process.removeListener("SIGINT", stop);
-      process.removeListener("SIGTERM", stop);
-      if (code === 0 || code === null) finish();
-      else finish(new Error(`dev-stack.mjs exited with ${code}`));
-    });
-
-    const onLine = (line) => {
-      const match = line.match(/Convex backend:\s+(https?:\/\/\S+)/u);
-      if (!match || registered) return;
-      registered = true;
-      void registerAndStartSession({
-        payload,
-        convexUrl: match[1],
-        runners,
-        planners
-      })
-        .then((sessionId) => {
-          console.log("");
-          console.log(`Running ${payload.slug}`);
-          console.log(`  Session id: ${sessionId}`);
-          console.log(`  Desired runners: ${runners}`);
-          console.log(`  Planner batch size: ${planners}`);
-          console.log("");
-        })
-        .catch((error) => {
-          stop();
-          finish(error);
-        });
-    };
-
-    pipeLines(child.stdout, process.stdout, onLine);
-    pipeLines(child.stderr, process.stderr, onLine);
+  const payload = await client.query(api.orchestration.searchSessionResults, {
+    session,
+    text: text || undefined,
+    promotedOnly: Boolean(args.promoted || args.promotions || args.latestPromotion),
+    latestPromotionOnly: Boolean(args.latestPromotion || args.latest),
+    status: typeof args.status === "string" ? args.status : undefined,
+    metricFilters,
+    limit: positiveIntegerArg(args, "limit", 25),
   });
-}
 
-function pipeLines(input, output, onLine) {
-  let buffer = "";
-  input.on("data", (chunk) => {
-    const text = chunk.toString();
-    output.write(text);
-    buffer += text;
-    const lines = buffer.split(/\r?\n/u);
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      onLine(line);
-    }
-  });
-}
-
-function resolveConvexUrl(args) {
-  const convexUrl =
-    args.convexUrl ??
-    process.env.CONVEX_URL ??
-    process.env.VITE_CONVEX_URL ??
-    loadEnvFile(path.join(ROOT, ".env.local")).VITE_CONVEX_URL;
-  if (!convexUrl) {
-    throw new Error("Missing Convex URL. Run `autoresearch dev`, pass --convex-url, or omit --no-stack.");
+  if (!payload.session) {
+    throw new Error(`No session found for ${session}`);
   }
-  return convexUrl;
+  if (args.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  printSearchResults(payload);
 }
 
 function printSessionGuide(argv) {
@@ -1250,6 +1276,80 @@ function shellQuote(value) {
   return `'${text.replace(/'/g, "'\"'\"'")}'`;
 }
 
+function resolveConvexUrl(args) {
+  const convexUrl =
+    args.convexUrl ??
+    process.env.CONVEX_URL ??
+    process.env.VITE_CONVEX_URL ??
+    loadEnvFile(path.join(ROOT, ".env.local")).VITE_CONVEX_URL;
+  if (!convexUrl) {
+    throw new Error("Missing Convex URL. Run `autoresearch dev` or pass --convex-url.");
+  }
+  return convexUrl;
+}
+
+function parseMetricFilters(value) {
+  const rawFilters = Array.isArray(value) ? value : value ? [value] : [];
+  return rawFilters.flatMap((raw) =>
+    String(raw)
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .map(parseMetricFilter)
+  );
+}
+
+function parseMetricFilter(value) {
+  const match = value.match(/^([^<>=!:]+)\s*(>=|<=|==|!=|>|<|=|:)\s*(-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)$/iu);
+  if (!match) {
+    throw new Error(`Invalid --metric filter: ${value}. Use NAME>=VALUE, NAME<=VALUE, NAME=VALUE, or NAME:VALUE.`);
+  }
+  const [, name, rawOp, rawValue] = match;
+  const numericValue = Number(rawValue);
+  if (!Number.isFinite(numericValue)) {
+    throw new Error(`Invalid metric value in --metric ${value}`);
+  }
+  return {
+    name: name.trim(),
+    op: rawOp === ":" ? "=" : rawOp,
+    value: numericValue,
+  };
+}
+
+function printSearchResults(payload) {
+  const { session, results } = payload;
+  console.log(`${session.slug} - ${results.length} result${results.length === 1 ? "" : "s"}`);
+  if (results.length === 0) {
+    return;
+  }
+  for (const result of results) {
+    const metrics = formatMetrics(result.metrics);
+    const marker = result.promoted ? " promoted" : "";
+    console.log(`#${result.ordinal} ${result.status}${marker} ${result.changeKind}`);
+    console.log(`  ${result.hypothesis}`);
+    if (metrics) {
+      console.log(`  metrics: ${metrics}`);
+    }
+    if (typeof result.score === "number") {
+      console.log(`  score: ${formatNumber(result.score)}`);
+    }
+  }
+}
+
+function formatMetrics(metrics) {
+  if (!metrics || Object.keys(metrics).length === 0) {
+    return "";
+  }
+  return Object.entries(metrics)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, value]) => `${name}=${formatNumber(value)}`)
+    .join(", ");
+}
+
+function formatNumber(value) {
+  return Number.isInteger(value) ? String(value) : Number(value).toPrecision(6).replace(/\.?0+$/u, "");
+}
+
 function runDoctor() {
   const checks = [
     {
@@ -1420,18 +1520,28 @@ function parseArgs(argv) {
     const rawKey = equalsIndex >= 0 ? item.slice(2, equalsIndex) : item.slice(2);
     const key = rawKey.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (equalsIndex >= 0) {
-      parsed[key] = item.slice(equalsIndex + 1);
+      setParsedArg(parsed, key, item.slice(equalsIndex + 1));
       continue;
     }
     const next = argv[index + 1];
     if (!next || next.startsWith("--")) {
-      parsed[key] = true;
+      setParsedArg(parsed, key, true);
       continue;
     }
-    parsed[key] = next;
+    setParsedArg(parsed, key, next);
     index += 1;
   }
   return parsed;
+}
+
+function setParsedArg(parsed, key, value) {
+  if (parsed[key] === undefined) {
+    parsed[key] = value;
+  } else if (Array.isArray(parsed[key])) {
+    parsed[key].push(value);
+  } else {
+    parsed[key] = [parsed[key], value];
+  }
 }
 
 function loadEnvFile(filePath) {
@@ -1451,9 +1561,12 @@ function printHelp() {
   console.log(`Usage:
   autoresearch init [project-dir] [--force]
   autoresearch dev
-  autoresearch run <session-dir> [run options]
+  autoresearch run [stack options]
+  autoresearch restart [stack options]
   autoresearch session guide [session-dir] [guide options]
   autoresearch session add <session-dir> [--convex-url URL] [--dry-run]
+  autoresearch session search <session> [query] [search options]
+  autoresearch search <session> [query] [search options]
   autoresearch doctor
   autoresearch install-tex --macos
   autoresearch runner [runner options]
@@ -1462,21 +1575,33 @@ function printHelp() {
 
 function printRunHelp() {
   console.log(`Usage:
-  autoresearch run <session-dir> [run options]
+  autoresearch run [stack options]
 
-Starts the local stack, registers or updates the session, resumes it, and sets
-worker control so runners begin consuming queued experiments.
+Starts the local Convex backend, production frontend preview, orchestrator
+supervisor, and runner supervisor.
 
-Run options:
-  --runners N          Desired local runner count. Defaults to session maxConcurrentRuns or 1.
-  --planners N         Planner batch size. Defaults to session maxPlannedConcurrentExperiments or 3.
-  --convex-url URL     Convex deployment URL. Also passed to the local stack.
-  --frontend-port N    Frontend port for the local stack.
-  --no-stack           Do not start the local stack; use an existing Convex backend.
+Stack options:
+  --convex-url URL     Convex deployment URL.
+  --frontend-port N    Frontend preview port.
   --no-reuse           Force the local stack to start a fresh Convex process.
   --no-workers         Start the stack without its worker supervisor.
-  --worker-poll-ms N   Worker supervisor polling interval.
-  --dry-run            Print the resolved run payload without contacting Convex.`);
+  --worker-poll-ms N   Worker supervisor polling interval.`);
+}
+
+function printRestartHelp() {
+  console.log(`Usage:
+  autoresearch restart [stack options]
+
+Stops an existing stack started by \`autoresearch run\`, then starts a fresh
+production frontend preview stack in the current terminal. If no running stack
+is found, starts a new one.
+
+Stack options:
+  --convex-url URL     Convex deployment URL.
+  --frontend-port N    Frontend preview port.
+  --no-reuse           Force the local stack to start a fresh Convex process.
+  --no-workers         Start the stack without its worker supervisor.
+  --worker-poll-ms N   Worker supervisor polling interval.`);
 }
 
 function printInitHelp() {
@@ -1494,10 +1619,12 @@ function printSessionHelp() {
   console.log(`Usage:
   autoresearch session guide [session-dir] [guide options]
   autoresearch session add <session-dir> [--convex-url URL] [--dry-run]
+  autoresearch session search <session> [query] [search options]
 
 Session commands:
   guide       Print exact session folder setup and session.json guidance.
-  add         Add or update a session from session.json through Convex.`);
+  add         Add or update a session from session.json through Convex.
+  search      Search experiment results for a registered session.`);
 }
 
 function printSessionGuideHelp() {
@@ -1537,6 +1664,21 @@ Adds or updates a session from <session-dir>/session.json.
 Options:
   --convex-url URL   Convex deployment URL. Defaults to CONVEX_URL, VITE_CONVEX_URL, or .env.local.
   --dry-run          Print the resolved payload without contacting Convex.`);
+}
+
+function printSessionSearchHelp() {
+  console.log(`Usage:
+  autoresearch session search <session-slug-or-id> [query] [search options]
+  autoresearch search <session-slug-or-id> [query] [search options]
+
+Search options:
+  --convex-url URL       Convex deployment URL. Defaults to CONVEX_URL, VITE_CONVEX_URL, or .env.local.
+  --promoted            Return all promotion milestones.
+  --latest-promotion    Return only the latest promotion milestone.
+  --status STATUS       Filter by experiment status.
+  --metric EXPR         Filter by metric comparison. Repeatable. Examples: "loss<=0.4", "accuracy>0.8".
+  --limit N             Maximum result count. Defaults to 25.
+  --json                Print raw JSON.`);
 }
 
 main().catch((error) => {

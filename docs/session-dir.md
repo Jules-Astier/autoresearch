@@ -105,6 +105,10 @@ environment instead.
   "sandbox": {
     "environment": "none"
   },
+  "earlyStopping": {
+    "enabled": true,
+    "maxPlanningCyclesWithoutAcceptedExperiments": 3
+  },
   "metricContract": {
     "rankingMode": "lexicographic",
     "metrics": [
@@ -139,15 +143,22 @@ benchmark process as `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
 planner may propose in a single planning cycle. It defaults to 3 and is capped by
 the remaining target experiment count.
 
+`earlyStopping.maxPlanningCyclesWithoutAcceptedExperiments` pauses the session
+after that many consecutive completed planning cycles approve zero experiments.
+Set `earlyStopping.enabled: true` to activate it. This is useful when the
+researcher, planner, and reviewer have exhausted viable ideas and continued
+planning would only burn agent time.
+
 `workspaceLinks` is important for long sessions. It creates explicit symlinks
 inside every runner workspace after checkout and before the worker or benchmark
 runs. Use it for large read-only generated inputs that should be shared across
 runs, such as prepared datasets, cached features, or tensor bundles. Without it,
 each run can leave another copy under `~/.autoresearch/runner/<session>/<run>/`.
-`workspacePath` is relative to the runner workspace and must not already exist in
-the checkout; `targetPath` is resolved at registration time and must exist on the
-runner host. Pair linked paths with `immutablePaths` so workers know they must
-read them but not modify them.
+`workspacePath` is relative to the runner workspace; if the fresh checkout
+already contains that path, the runner replaces it with the configured symlink
+before applying patches or starting the worker. `targetPath` is resolved at
+registration time and must exist on the runner host. Pair linked paths with
+`immutablePaths` so workers know they must read them but not modify them.
 
 ## Durable Research Memory
 
@@ -320,7 +331,7 @@ contract.
 Start the local stack:
 
 ```bash
-autoresearch dev
+autoresearch run
 ```
 
 Initialize project-local session docs and a reference session:
@@ -341,22 +352,34 @@ Register a session from any directory:
 autoresearch session add /path/to/my-session
 ```
 
-Start the local stack and run a session in one command:
+Start the local stack without adding a session:
 
 ```bash
-autoresearch run /path/to/my-session
+autoresearch run
 ```
 
-`autoresearch run` registers or updates the session, resumes it, sets desired
-local runners, and leaves the stack running in the foreground. Pass `--runners N`
-or `--planners N` to override the session's concurrency defaults. If the stack is
-already running elsewhere, use `--no-stack` with `--convex-url` when needed:
+`autoresearch run` starts the local Convex backend, serves the production
+frontend preview, and supervises orchestrator and runner workers. Add sessions
+from the UI or with `autoresearch session add` after the stack is available.
+For frontend development, use `autoresearch dev`.
+
+Restart a stack that was started with `autoresearch run`:
 
 ```bash
-autoresearch run /path/to/my-session --no-stack --convex-url http://127.0.0.1:3210
+autoresearch restart
 ```
+
+`autoresearch restart` stops the existing run stack, then starts a fresh
+production frontend preview stack in the current terminal.
 
 If the stack is not using the default `.env.local`, pass the Convex URL:
+
+```bash
+autoresearch run --convex-url http://127.0.0.1:3210
+```
+
+When adding a session to an existing non-default backend, pass the same Convex
+URL:
 
 ```bash
 autoresearch session add /path/to/my-session --convex-url http://127.0.0.1:3210

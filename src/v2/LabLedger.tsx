@@ -14,6 +14,7 @@ import { NotesPanel } from "./NotesPanel";
 import { NodeDetail } from "./NodeDetail";
 import { DiffSheet } from "./DiffSheet";
 import { Toolbar } from "./Toolbar";
+import { MetricPriorityPanel } from "./MetricPriorityPanel";
 import { NewSessionDialog, type NewSessionPayload } from "./NewSessionDialog";
 import { RemoveSessionDialog } from "./RemoveSessionDialog";
 import { buildLineage, type ExperimentLite, type RollbackLite } from "./lineageTree";
@@ -98,6 +99,9 @@ export function LabLedger() {
     ? experiments.find((e) => e._id === selectedExperimentId)
     : undefined;
   const selectedPatch = diffPatchId ? patches.find((p: any) => p._id === diffPatchId) : undefined;
+  const bestExperiment = session?.bestExperimentId
+    ? experiments.find((experiment) => experiment._id === session.bestExperimentId)
+    : undefined;
 
   const lastUpdate = session?.updatedAtUtc ?? session?.heartbeatAtUtc;
   const isLive =
@@ -136,10 +140,10 @@ export function LabLedger() {
                 session={session}
                 workerControl={workerControl}
                 activePlanningCycle={activePlanningCycle}
-                onPause={() => void pauseSession({ sessionId: session._id })}
-                onResume={() => void resumeSession({ sessionId: session._id })}
+                onPause={() => pauseSession({ sessionId: session._id })}
+                onResume={() => resumeSession({ sessionId: session._id })}
                 onStop={() =>
-                  void stopSession({ sessionId: session._id, reason: "manual_stop" })
+                  stopSession({ sessionId: session._id, reason: "manual_stop" })
                 }
                 onRequestExperiments={(count) =>
                   void requestMore({ sessionId: session._id, count })
@@ -198,6 +202,16 @@ export function LabLedger() {
                 session={session}
                 experiments={experiments}
                 onSelectExperiment={setSelectedExperimentId}
+              />
+              <MetricPriorityPanel
+                session={session}
+                bestExperimentOrdinal={bestExperiment?.ordinal}
+                onReorder={(metricContract) =>
+                  updateSessionContract({
+                    sessionId: session._id,
+                    metricContract,
+                  })
+                }
               />
               <HypothesisNow activeRun={activeRun} experiment={activeExperiment} />
 

@@ -46,6 +46,7 @@ async function main() {
       continue;
     }
 
+    const heartbeat = startPlanningHeartbeat(client, claim.planningCycleId);
     try {
       await runPlanningCycle(client, claim, args);
     } catch (error) {
@@ -53,14 +54,55 @@ async function main() {
       console.error(message);
       await client.mutation(api.orchestration.failPlanningCycle, {
         planningCycleId: claim.planningCycleId,
-        error: message.slice(0, 4000)
+        error: message.slice(0, 4000),
+        errorKind: classifyAgentError(message)
       });
+    } finally {
+      heartbeat.stop();
     }
 
     if (args.once) {
       return;
     }
   }
+}
+
+function startPlanningHeartbeat(client, planningCycleId) {
+  let stopped = false;
+  const beat = () => {
+    if (stopped) return;
+    client
+      .mutation(api.orchestration.heartbeatPlanningCycle, { planningCycleId })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`failed to heartbeat planning cycle ${planningCycleId}: ${message}`);
+      });
+  };
+  beat();
+  const timer = setInterval(beat, 15000);
+  return {
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+    }
+  };
+}
+
+function classifyAgentError(value) {
+  const text = String(value ?? "").toLowerCase();
+  if (/\b(401|403|unauthorized|forbidden|auth|api key|credential|permission denied|not logged in|login required|invalid api key|missing api key|config error|configuration error|misconfigured)\b/u.test(text)) {
+    return "auth/config_error";
+  }
+  if (/\b(429|rate limit|rate_limit|too many requests|quota|insufficient_quota|usage limit|credit|billing|out of credits)\b/u.test(text)) {
+    return "quota_exhausted";
+  }
+  if (/\b(503|502|504|unavailable|overloaded|capacity|temporarily unavailable|try again later)\b/u.test(text)) {
+    return "transient_agent_unavailable";
+  }
+  if (/\b(timeout|timed out|idle timeout|deadline|etimedout|econnreset|network)\b/u.test(text)) {
+    return "transient_agent_unavailable";
+  }
+  return "agent_failed_task";
 }
 
 async function runPlanningCycle(client, claim, args) {
@@ -191,6 +233,7 @@ Rules:
 - Translate references into clean single-change hypotheses that fit editable paths.
 - For architecture_change candidates, write the worker prompt so the worker directly uses ${MODEL_DIAGRAM_SKILL_NAME}, reads ${MODEL_DIAGRAM_SKILL_PATH}, and creates or updates only an editable TikZ \`.tex\` model diagram source for the diagram artifact.
 - If no diagram source exists yet for an architecture_change, tell the worker to create one, preferably ${DEFAULT_MODEL_DIAGRAM_SOURCE} when that path is editable.
+- Do not reject an architecture_change merely because no TikZ \`.tex\` source exists yet; reject it only when no editable \`.tex\` creation target can be named.
 - Tell the worker not to compile, render, or create PDF/PNG diagram files; the local runner processes the accepted \`.tex\` source into PNG.
 - Reject ideas already present in current code, prior experiments, or do-not-repeat guidance.
 - Prefer concrete follow-ups over broad research themes.
@@ -272,6 +315,7 @@ Rules:
 - Do not invent source URLs; only emit a source URL if it appears verbatim in the Researcher candidates JSON.
 - For architecture_change experiments, include worker instructions to use ${MODEL_DIAGRAM_SKILL_NAME}, read ${MODEL_DIAGRAM_SKILL_PATH}, and create or update only an editable TikZ \`.tex\` model diagram source for the diagram artifact.
 - If an architecture_change has no existing diagram source, tell the worker to create one, preferably ${DEFAULT_MODEL_DIAGRAM_SOURCE} when that path is editable.
+- Do not treat a missing existing diagram source as a hard rejection; the worker is expected to create the named editable \`.tex\` source when needed.
 - Tell the worker not to compile, render, or create PDF/PNG diagram files; the local runner processes the accepted \`.tex\` source into PNG.
 - Do not change data, benchmark command, metric parsing, immutable files, target definitions, credentials, or deployment behavior.
 
@@ -321,6 +365,7 @@ Rules:
 - Preserve sources from the planner proposal on approved experiments.
 - Reject architecture_change proposals whose worker prompt does not require ${MODEL_DIAGRAM_SKILL_NAME} and creation or update of only an editable TikZ \`.tex\` model diagram source for the diagram artifact.
 - Reject architecture_change proposals that need a new diagram source but do not name an editable \`.tex\` path such as ${DEFAULT_MODEL_DIAGRAM_SOURCE}.
+- Do not reject architecture_change proposals solely because the named editable \`.tex\` diagram source does not exist yet.
 - Reject architecture_change proposals that ask the worker to compile, render, or create PDF/PNG diagram files.
 
 Return only JSON:

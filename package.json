@@ -8,7 +8,8 @@
   },
   "scripts": {
     "init:project": "node bin/autoresearch.mjs init",
-    "run:session": "node bin/autoresearch.mjs run",
+    "run:stack": "node bin/autoresearch.mjs run",
+    "restart:stack": "node bin/autoresearch.mjs restart",
     "session:add": "node bin/autoresearch.mjs session add",
     "doctor": "node bin/autoresearch.mjs doctor",
     "install-tex:macos": "node bin/autoresearch.mjs install-tex --macos",

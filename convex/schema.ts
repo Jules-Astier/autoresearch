@@ -97,6 +97,8 @@ export default defineSchema({
     rollbackTargetExperimentId: v.optional(v.id("researchExperiments")),
     rollbackCount: v.optional(v.float64()),
     rolledBackAtUtc: v.optional(v.string()),
+    planningRetryCount: v.optional(v.float64()),
+    planningRetryAfterUtc: v.optional(v.string()),
     stoppedReason: v.optional(v.string()),
     createdAtUtc: v.string(),
     updatedAtUtc: v.string()
@@ -112,6 +114,8 @@ export default defineSchema({
     hypothesis: v.string(),
     prompt: v.string(),
     activeRunId: v.optional(v.id("researchRuns")),
+    retryCount: v.optional(v.float64()),
+    nextRetryAtUtc: v.optional(v.string()),
     metrics: v.optional(v.record(v.string(), v.float64())),
     score: v.optional(v.float64()),
     sources: v.optional(v.array(researchExperimentSource)),
@@ -133,13 +137,15 @@ export default defineSchema({
     workspacePath: v.optional(v.string()),
     claimedAtUtc: v.string(),
     startedAtUtc: v.optional(v.string()),
+    lastHeartbeatAtUtc: v.optional(v.string()),
     finishedAtUtc: v.optional(v.string()),
     codexExitCode: v.optional(v.float64()),
     benchmarkExitCode: v.optional(v.float64()),
     metrics: v.optional(v.record(v.string(), v.float64())),
     score: v.optional(v.float64()),
     summary: v.optional(v.string()),
-    error: v.optional(v.string())
+    error: v.optional(v.string()),
+    errorKind: v.optional(v.string())
   })
     .index("by_session", ["sessionId"])
     .index("by_experiment", ["experimentId"])
@@ -194,7 +200,9 @@ export default defineSchema({
     plannerOutput: v.optional(v.string()),
     reviewerOutput: v.optional(v.string()),
     error: v.optional(v.string()),
+    errorKind: v.optional(v.string()),
     startedAtUtc: v.string(),
+    lastHeartbeatAtUtc: v.optional(v.string()),
     completedAtUtc: v.optional(v.string())
   })
     .index("by_session", ["sessionId", "startedAtUtc"])

@@ -34,26 +34,24 @@ codex --login
 
 ## Run
 
-Start the local Convex backend, React app, planner supervisor, and runner
-supervisor:
+Start the local Convex backend, production frontend preview, planner supervisor,
+and runner supervisor:
 
 ```bash
-autoresearch dev
+autoresearch run
 ```
 
 The first Convex run writes `VITE_CONVEX_URL` to `.env.local`. Local Convex state
 lives under `.convex/` and is intentionally ignored by git.
 
-To start the stack and immediately run a session:
+For frontend development, use the Vite dev server stack:
 
 ```bash
-autoresearch run /path/to/my-session
+autoresearch dev
 ```
 
-That registers or updates the session, resumes it, sets local runner control, and
-keeps the local stack attached in the current terminal. Use `--runners N` or
-`--planners N` to override the session defaults, or `--no-stack` to target an
-already running Convex backend.
+After the stack is running, add sessions from the UI or with
+`autoresearch session add`.
 
 ## Register A Session
 
@@ -135,6 +133,9 @@ it for the 5 minute default, or set `"computeBudget": { "seconds": 600 }`. The
 benchmark process also receives `AUTORESEARCH_COMPUTE_BUDGET_SECONDS`.
 
 `maxPlannedConcurrentExperiments` controls planner batch size for that session.
+Set `earlyStopping.enabled: true` with
+`maxPlanningCyclesWithoutAcceptedExperiments` to pause a session after repeated
+planning cycles approve no experiments.
 `sandbox.environment` selects where workers and benchmarks run: `none` for host
 execution, or `docker`, `podman`, or `vercel` through Sandcastle.
 
@@ -174,8 +175,9 @@ autoresearch install-tex --macos
 ## Useful Commands
 
 ```bash
+autoresearch run
+autoresearch restart
 autoresearch dev
-autoresearch run ./my-session
 autoresearch init
 autoresearch session guide ./my-session --repo-path ../target-project
 autoresearch session add ./my-session
@@ -189,6 +191,8 @@ Package scripts are also available:
 
 ```bash
 npm run dev:stack
+npm run run:stack
+npm run restart:stack
 npm run doctor
 npm run install-tex:macos
 npm run convex:dev:local

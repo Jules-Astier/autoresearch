@@ -5,9 +5,9 @@ type Props = {
   session: any;
   workerControl: any | undefined;
   activePlanningCycle?: any;
-  onPause: () => void;
-  onResume: () => void;
-  onStop: () => void;
+  onPause: () => Promise<unknown> | void;
+  onResume: () => Promise<unknown> | void;
+  onStop: () => Promise<unknown> | void;
   onRequestExperiments: (count: number) => void;
   onSetRunners: (count: number) => void;
   onSetPlannerCount: (count: number) => void;
@@ -38,6 +38,9 @@ export function Toolbar({
   const [computeBudgetSeconds, setComputeBudgetSeconds] = useState(
     String(resolveComputeBudgetSeconds(session?.computeBudget)),
   );
+  const [pendingLifecycleAction, setPendingLifecycleAction] = useState<
+    "pause" | "resume" | "stop" | undefined
+  >();
 
   useEffect(() => {
     setRunners(workerControl?.desiredRunnerCount ?? 1);
@@ -60,9 +63,17 @@ export function Toolbar({
   const memoryKeeperEnabled =
     memorySystemEnabled && session?.memory?.memoryKeeper?.enabled !== false;
   const isPausable = status !== "paused" && status !== "stopped" && status !== "completed";
+  const lifecycleDetail =
+    status === "paused" && (session?.activeRunCount ?? 0) > 0
+      ? "draining active run"
+      : status === "paused" && activePlanningCycle
+        ? "clearing planner"
+        : "";
   const progressParts = [
     `${session?.completedExperimentCount ?? 0}/${session?.targetExperimentCount ?? 0} done`,
     `${session?.activeRunCount ?? 0} active`,
+    lifecycleDetail,
+    session?.stoppedReason ? `reason ${formatSessionReason(session.stoppedReason)}` : "",
     activePlanningCycle
       ? `planning ${activePlanningCycle.requestedCount ?? ""}`.trim()
       : "",
@@ -92,20 +103,47 @@ export function Toolbar({
     onSetComputeBudgetSeconds(clamped);
   }
 
+  async function runLifecycleAction(
+    action: "pause" | "resume" | "stop",
+    callback: () => Promise<unknown> | void,
+  ) {
+    setPendingLifecycleAction(action);
+    try {
+      await callback();
+    } finally {
+      setPendingLifecycleAction(undefined);
+    }
+  }
+
   return (
     <div className="toolbar" aria-label="Session controls">
       <div className="group">
         {isPausable ? (
-          <button type="button" className="btn" onClick={onPause}>
-            <Pause size={13} /> pause
+          <button
+            type="button"
+            className="btn"
+            disabled={Boolean(pendingLifecycleAction)}
+            onClick={() => void runLifecycleAction("pause", onPause)}
+          >
+            <Pause size={13} /> {pendingLifecycleAction === "pause" ? "pausing" : "pause"}
           </button>
         ) : (
-          <button type="button" className="btn" onClick={onResume}>
-            <Play size={13} /> resume
+          <button
+            type="button"
+            className="btn"
+            disabled={Boolean(pendingLifecycleAction)}
+            onClick={() => void runLifecycleAction("resume", onResume)}
+          >
+            <Play size={13} /> {pendingLifecycleAction === "resume" ? "resuming" : "resume"}
           </button>
         )}
-        <button type="button" className="btn btn-quiet" onClick={onStop}>
-          <Square size={13} /> stop
+        <button
+          type="button"
+          className="btn btn-quiet"
+          disabled={Boolean(pendingLifecycleAction)}
+          onClick={() => void runLifecycleAction("stop", onStop)}
+        >
+          <Square size={13} /> {pendingLifecycleAction === "stop" ? "stopping" : "stop"}
         </button>
       </div>
 
@@ -249,4 +287,13 @@ function resolveComputeBudgetSeconds(value: any): number {
   const minutes = value?.minutes ?? value?.durationMinutes;
   if (Number.isFinite(Number(minutes))) return Math.trunc(Number(minutes) * 60);
   return 300;
+}
+
+function formatSessionReason(value: unknown): string {
+  const reason = String(value ?? "");
+  if (reason === "quota_exhausted") return "quota exhausted";
+  if (reason === "auth/config_error") return "auth or config";
+  if (reason === "transient_agent_unavailable") return "agent unavailable";
+  if (reason === "agent_failed_task") return "agent task failed";
+  return reason.replace(/_/g, " ");
 }

@@ -12,7 +12,9 @@ type PlanningCycle = {
   plannerOutput?: string;
   reviewerOutput?: string;
   error?: string;
+  errorKind?: string;
   startedAtUtc: string;
+  lastHeartbeatAtUtc?: string;
   completedAtUtc?: string;
 };
 
@@ -31,6 +33,7 @@ type ActiveRun = {
   status: string;
   runNumber: number;
   startedAtUtc?: string;
+  lastHeartbeatAtUtc?: string;
   claimedAtUtc: string;
 } | null;
 
@@ -133,7 +136,7 @@ export function AgentsPanel({
         label: "planner",
         active: Boolean(activeCycle),
         detail: activeCycle
-          ? `cycle ${activeCycle.requestedCount} req · ${activeCycle.plannerWorkerId.slice(0, 8)}`
+          ? `cycle ${activeCycle.requestedCount} req · ${heartbeatDetail(activeCycle.lastHeartbeatAtUtc ?? activeCycle.startedAtUtc)}`
           : `${desiredPlanners} desired`,
         usage: usageDetail(agentUsageSummary, "planner"),
       },
@@ -153,7 +156,7 @@ export function AgentsPanel({
         label: "worker",
         active: Boolean(activeRun),
         detail: activeRun
-          ? `#${activeExperiment?.ordinal ?? "?"} · ${activeRun.status} · ${formatElapsed(activeRun.startedAtUtc ?? activeRun.claimedAtUtc)}`
+          ? `#${activeExperiment?.ordinal ?? "?"} · ${activeRun.status} · ${heartbeatDetail(activeRun.lastHeartbeatAtUtc ?? activeRun.startedAtUtc ?? activeRun.claimedAtUtc)}`
           : `${desiredRunners} desired`,
         usage: usageDetail(agentUsageSummary, "worker"),
       },
@@ -245,32 +248,7 @@ export function AgentsPanel({
                     </span>
                   </button>
                   {expanded ? (
-                    <div className="cycle-body">
-                      {cycle.error ? (
-                        <CycleSection title="error" body={cycle.error} tone="error" />
-                      ) : null}
-                      {cycle.prompt ? (
-                        <CycleSection title="prompt" body={cycle.prompt} />
-                      ) : null}
-                      {cycle.researcherOutput ? (
-                        <CycleSection
-                          title="researcher"
-                          body={cycle.researcherOutput}
-                        />
-                      ) : null}
-                      {cycle.plannerOutput ? (
-                        <CycleSection
-                          title="planner"
-                          body={cycle.plannerOutput}
-                        />
-                      ) : null}
-                      {cycle.reviewerOutput ? (
-                        <CycleSection
-                          title="reviewer"
-                          body={cycle.reviewerOutput}
-                        />
-                      ) : null}
-                    </div>
+                    <CycleDetails cycle={cycle} />
                   ) : null}
                 </li>
               );
@@ -308,6 +286,70 @@ export function AgentsPanel({
   );
 }
 
+const CYCLE_AGENT_TABS = [
+  { key: "researcher", label: "researcher", className: "researcher" },
+  { key: "planner", label: "planner", className: "planner" },
+  { key: "reviewer", label: "reviewer", className: "reviewer" },
+] as const;
+
+type CycleAgentKey = (typeof CYCLE_AGENT_TABS)[number]["key"];
+
+function CycleDetails({ cycle }: { cycle: PlanningCycle }) {
+  const [activeTab, setActiveTab] = useState<CycleAgentKey>("researcher");
+  const outputs: Record<CycleAgentKey, string | undefined> = {
+    researcher: cycle.researcherOutput,
+    planner: cycle.plannerOutput,
+    reviewer: cycle.reviewerOutput,
+  };
+  const activeBody = outputs[activeTab];
+
+  return (
+    <div className="cycle-body">
+      {cycle.errorKind ? (
+        <CycleSection title="error kind" body={formatErrorKind(cycle.errorKind)} tone="error" />
+      ) : null}
+      {cycle.error ? (
+        <CycleSection title="error" body={cycle.error} tone="error" />
+      ) : null}
+      {cycle.prompt ? (
+        <CycleSection title="prompt" body={cycle.prompt} />
+      ) : null}
+      <div className="cycle-agent-responses">
+        <div
+          className="cycle-agent-tabs"
+          role="tablist"
+          aria-label="planning cycle agent responses"
+        >
+          {CYCLE_AGENT_TABS.map((tab) => {
+            const selected = activeTab === tab.key;
+            return (
+              <button
+                key={tab.key}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                className={`cycle-agent-tab ${tab.className} ${selected ? "is-active" : ""}`}
+                onClick={() => setActiveTab(tab.key)}
+              >
+                <span className="cycle-agent-tab-dot" />
+                <span>{tab.label}</span>
+                <span className="cycle-agent-tab-state">
+                  {outputs[tab.key] ? "ready" : "pending"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className={`cycle-agent-panel ${activeTab}`} role="tabpanel">
+          <pre className="cycle-section-body">
+            {activeBody ?? `${activeTab} response has not been recorded yet.`}
+          </pre>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CycleSection({
   title,
   body,
@@ -339,6 +381,18 @@ function usageDetail(summary: AgentUsageSummary, ...keys: string[]): string {
     .find((item) => item && item.calls > 0);
   if (!usage) return "";
   return `${formatTokens(usage.totalTokens)} tok · ${usage.calls} call${usage.calls === 1 ? "" : "s"}`;
+}
+
+function heartbeatDetail(value: string | undefined): string {
+  return value ? `heartbeat ${formatRelativeShort(value)}` : "heartbeat unknown";
+}
+
+function formatErrorKind(value: string): string {
+  if (value === "quota_exhausted") return "quota exhausted";
+  if (value === "auth/config_error") return "auth or config error";
+  if (value === "transient_agent_unavailable") return "transient agent unavailable";
+  if (value === "agent_failed_task") return "agent task failed";
+  return value.replace(/_/g, " ");
 }
 
 function formatTokens(value: number | undefined): string {

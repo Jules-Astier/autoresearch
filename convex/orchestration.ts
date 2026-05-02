@@ -21,6 +21,12 @@ const tokenUsageArgs = {
 const WORKER_CONTROL_KEY = "local";
 const DEFAULT_COMPUTE_BUDGET_SECONDS = 300;
 const PLANNING_CYCLE_STALE_MS = 30 * 60 * 1000;
+const RUN_STALE_MS = 30 * 60 * 1000;
+const ACTIVE_RUN_STATUSES = new Set(["claimed", "running"]);
+const TRANSIENT_AGENT_UNAVAILABLE = "transient_agent_unavailable";
+const QUOTA_EXHAUSTED = "quota_exhausted";
+const AUTH_CONFIG_ERROR = "auth/config_error";
+const AGENT_FAILED_TASK = "agent_failed_task";
 
 const createSessionArgs = {
   slug: v.string(),
@@ -154,6 +160,93 @@ export const getSessionDetail = query({
       memoryNotes,
       activeRun,
       activeLogs: activeLogs.reverse(),
+    };
+  },
+});
+
+export const searchSessionResults = query({
+  args: {
+    session: v.string(),
+    text: v.optional(v.string()),
+    promotedOnly: v.optional(v.boolean()),
+    latestPromotionOnly: v.optional(v.boolean()),
+    status: v.optional(v.string()),
+    metricFilters: v.optional(v.array(v.object({
+      name: v.string(),
+      op: v.string(),
+      value: v.float64(),
+    }))),
+    limit: v.optional(v.float64()),
+  },
+  handler: async (ctx, args) => {
+    const session = await findSessionBySlugOrId(ctx, args.session);
+    if (!session) {
+      return { session: null, results: [] };
+    }
+
+    const experiments = await ctx.db
+      .query("researchExperiments")
+      .withIndex("by_session_ordinal", (q) => q.eq("sessionId", session._id))
+      .collect();
+    const promotionMilestoneIds = promotionMilestoneIdsForSession(
+      session.metricContract,
+      experiments.map((experiment) => ({
+        id: String(experiment._id),
+        ordinal: experiment.ordinal,
+        status: experiment.status,
+        metrics: experiment.metrics,
+        score: experiment.score,
+      })),
+    );
+
+    const queryText = String(args.text ?? "").trim().toLowerCase();
+    const status = String(args.status ?? "").trim().toLowerCase();
+    const metricFilters = args.metricFilters ?? [];
+    const limit = normalizeInteger(args.limit ?? 25, "limit", 1, 500);
+    const results = experiments
+      .map((experiment) => ({
+        ...experiment,
+        promoted:
+          experiment.promoted || promotionMilestoneIds.has(String(experiment._id)),
+      }))
+      .filter((experiment) => {
+        if (status && experiment.status.toLowerCase() !== status) {
+          return false;
+        }
+        if (args.promotedOnly && !experiment.promoted) {
+          return false;
+        }
+        if (queryText && !experimentSearchText(experiment).includes(queryText)) {
+          return false;
+        }
+        return metricFilters.every((filter) =>
+          metricFilterMatches(experiment.metrics, filter.name, filter.op, filter.value),
+        );
+      })
+      .sort((a, b) => b.ordinal - a.ordinal);
+
+    return {
+      session: {
+        _id: session._id,
+        slug: session.slug,
+        title: session.title,
+        metricContract: session.metricContract,
+      },
+      results: (args.latestPromotionOnly
+        ? results.filter((experiment) => experiment.promoted).slice(0, 1)
+        : results.slice(0, limit)
+      ).map((experiment) => ({
+        _id: experiment._id,
+        ordinal: experiment.ordinal,
+        status: experiment.status,
+        changeKind: experiment.changeKind,
+        hypothesis: experiment.hypothesis,
+        metrics: experiment.metrics,
+        score: experiment.score,
+        promoted: experiment.promoted,
+        createdAtUtc: experiment.createdAtUtc,
+        updatedAtUtc: experiment.updatedAtUtc,
+      })),
     };
   },
 });
@@ -355,7 +448,7 @@ export const updateResearchSessionContract = mutation({
     earlyStopping: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
-    await mustGetSession(ctx, args.sessionId);
+    const session = await mustGetSession(ctx, args.sessionId);
     const patch: Record<string, unknown> = { updatedAtUtc: nowUtc() };
     if (args.benchmarkCommand !== undefined)
       patch.benchmarkCommand = args.benchmarkCommand;
@@ -382,12 +475,47 @@ export const updateResearchSessionContract = mutation({
       patch.agent = args.agent;
     if (args.memory !== undefined)
       patch.memory = normalizeMemoryConfig(args.memory);
-    if (args.metricContract !== undefined)
-      patch.metricContract = normalizeMetricContract(args.metricContract);
+    let normalizedMetricContract: any | undefined;
+    if (args.metricContract !== undefined) {
+      normalizedMetricContract = normalizeMetricContract(args.metricContract);
+      patch.metricContract = normalizedMetricContract;
+    }
     if (args.sandbox !== undefined)
       patch.sandbox = normalizeSandboxConfig(args.sandbox);
     if (args.earlyStopping !== undefined)
       patch.earlyStopping = args.earlyStopping;
+    if (normalizedMetricContract !== undefined) {
+      const experiments = await ctx.db
+        .query("researchExperiments")
+        .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+        .collect();
+      const rescoredSession = { ...session, metricContract: normalizedMetricContract };
+      const best = bestExperimentForSession(rescoredSession, experiments);
+      const promotionMilestoneIds = promotionMilestoneIdsForSession(
+        normalizedMetricContract,
+        experiments.map((experiment) => ({
+          id: String(experiment._id),
+          ordinal: experiment.ordinal,
+          status: experiment.status,
+          metrics: experiment.metrics,
+        })),
+      );
+
+      patch.bestExperimentId = best?.experiment._id;
+      patch.bestScore = best?.score;
+      patch.bestMetrics = best?.metrics;
+
+      for (const experiment of experiments) {
+        const shouldPromote = promotionMilestoneIds.has(String(experiment._id));
+        if (experiment.promoted !== shouldPromote) {
+          await ctx.db.patch(experiment._id, {
+            promoted: shouldPromote,
+            updatedAtUtc: patch.updatedAtUtc as string,
+          });
+        }
+      }
+    }
+
     await ctx.db.patch(args.sessionId, patch);
     await insertEvent(ctx, {
       sessionId: args.sessionId,
@@ -396,6 +524,8 @@ export const updateResearchSessionContract = mutation({
       payload: {
         computeBudget: args.computeBudget,
         maxPlannedConcurrentExperiments: args.maxPlannedConcurrentExperiments,
+        metricContract: normalizedMetricContract,
+        bestExperimentId: patch.bestExperimentId,
         editablePaths: args.editablePaths,
         immutablePaths: args.immutablePaths,
         runtimeConfigPaths: args.runtimeConfigPaths,
@@ -558,16 +688,26 @@ export const claimPlanningCycle = mutation({
     requestedCount: v.optional(v.float64()),
   },
   handler: async (ctx, args) => {
-    const session = args.sessionId
+    const claimedSession = args.sessionId
       ? await mustGetSession(ctx, args.sessionId)
       : await firstRunnableSession(ctx);
-    if (!session) {
+    if (!claimedSession) {
       return null;
     }
-    if (session.status !== "running") {
+    if (claimedSession.status !== "running") {
       return null;
     }
     const now = nowUtc();
+    const { session } = await reconcileSessionState(ctx, claimedSession._id, {
+      now,
+      expireStale: true,
+    });
+    if (session.status !== "running") {
+      return null;
+    }
+    if (isRetryDelayed(session.planningRetryAfterUtc, now)) {
+      return null;
+    }
     const activePlanningCycles = await activePlanningCyclesForSession(
       ctx,
       session._id,
@@ -620,6 +760,7 @@ export const claimPlanningCycle = mutation({
       requestedCount,
       plannerWorkerId: args.workerId,
       startedAtUtc: now,
+      lastHeartbeatAtUtc: now,
     });
     const experiments = await ctx.db
       .query("researchExperiments")
@@ -677,10 +818,12 @@ export const finishPlanningCycle = mutation({
       });
       return [];
     }
+    const now = nowUtc();
     await ctx.db.patch(args.planningCycleId, {
       researcherOutput: args.researcherOutput?.slice(-20000),
       plannerOutput: args.plannerOutput.slice(-20000),
       reviewerOutput: args.reviewerOutput.slice(-20000),
+      lastHeartbeatAtUtc: now,
     });
     if (args.researcherOutput) {
       await ctx.db.insert("researchAgentMessages", {
@@ -729,8 +872,10 @@ export const recordPlanningCycleResearcherOutput = mutation({
     if (cycle.status !== "running") {
       return;
     }
+    const now = nowUtc();
     await ctx.db.patch(args.planningCycleId, {
       researcherOutput: args.researcherOutput.slice(-20000),
+      lastHeartbeatAtUtc: now,
     });
   },
 });
@@ -739,6 +884,7 @@ export const failPlanningCycle = mutation({
   args: {
     planningCycleId: v.id("researchPlanningCycles"),
     error: v.string(),
+    errorKind: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const cycle = await ctx.db.get(args.planningCycleId);
@@ -752,8 +898,49 @@ export const failPlanningCycle = mutation({
     await ctx.db.patch(args.planningCycleId, {
       status: "failed",
       error: args.error.slice(-4000),
+      errorKind: args.errorKind,
+      lastHeartbeatAtUtc: now,
       completedAtUtc: now,
     });
+    const behavior = agentErrorBehavior(args.errorKind);
+    if (behavior === "retry") {
+      const session = await mustGetSession(ctx, cycle.sessionId);
+      const retryCount = Math.max(0, Number(session.planningRetryCount ?? 0)) + 1;
+      const retryAfter = retryAfterUtc(now, retryCount);
+      await ctx.db.patch(cycle.sessionId, {
+        planningRetryCount: retryCount,
+        planningRetryAfterUtc: retryAfter,
+        updatedAtUtc: now,
+      });
+      await insertEvent(ctx, {
+        sessionId: cycle.sessionId,
+        type: "planning.retry_scheduled",
+        message: `Scheduled planner retry after ${retryAfter}.`,
+        payload: {
+          planningCycleId: args.planningCycleId,
+          errorKind: args.errorKind,
+          retryCount,
+          retryAfterUtc: retryAfter,
+        },
+      });
+    }
+    if (behavior === "pause" || behavior === "quota") {
+      if (behavior === "quota") {
+        await setDesiredRunnerCount(ctx, 0, now);
+      }
+      await ctx.db.patch(cycle.sessionId, {
+        status: "paused",
+        stoppedReason: args.errorKind,
+        planningRetryAfterUtc: undefined,
+        updatedAtUtc: now,
+      });
+      await insertEvent(ctx, {
+        sessionId: cycle.sessionId,
+        type: "session.paused",
+        message: `Paused session after ${args.errorKind}.`,
+        payload: { planningCycleId: args.planningCycleId, errorKind: args.errorKind },
+      });
+    }
     await insertEvent(ctx, {
       sessionId: cycle.sessionId,
       type: "planning.failed",
@@ -763,18 +950,39 @@ export const failPlanningCycle = mutation({
   },
 });
 
+export const heartbeatPlanningCycle = mutation({
+  args: { planningCycleId: v.id("researchPlanningCycles") },
+  handler: async (ctx, { planningCycleId }) => {
+    const cycle = await ctx.db.get(planningCycleId);
+    if (!cycle || cycle.status !== "running") {
+      return { status: cycle?.status ?? "missing", accepted: false };
+    }
+    const now = nowUtc();
+    await ctx.db.patch(planningCycleId, { lastHeartbeatAtUtc: now });
+    await ctx.db.patch(cycle.sessionId, { updatedAtUtc: now });
+    return { status: cycle.status, accepted: true };
+  },
+});
+
 export const claimNextExperiment = mutation({
   args: { workerId: v.string() },
   handler: async (ctx, { workerId }) => {
-    const sessions = await ctx.db
+    const claimedSessions = await ctx.db
       .query("researchSessions")
       .withIndex("by_status", (q) => q.eq("status", "running"))
       .collect();
     const now = nowUtc();
 
-    for (const session of sessions.sort((a, b) =>
+    for (const claimedSession of claimedSessions.sort((a, b) =>
       a.updatedAtUtc.localeCompare(b.updatedAtUtc),
     )) {
+      const { session } = await reconcileSessionState(ctx, claimedSession._id, {
+        now,
+        expireStale: true,
+      });
+      if (session.status !== "running") {
+        continue;
+      }
       if (session.activeRunCount >= session.maxConcurrentRuns) {
         continue;
       }
@@ -785,12 +993,15 @@ export const claimNextExperiment = mutation({
         continue;
       }
 
-      let experiment = await ctx.db
+      const queuedExperiments = await ctx.db
         .query("researchExperiments")
         .withIndex("by_session_status", (q) =>
           q.eq("sessionId", session._id).eq("status", "queued"),
         )
-        .first();
+        .collect();
+      let experiment = queuedExperiments
+        .sort((a, b) => a.ordinal - b.ordinal)
+        .find((item) => !isRetryDelayed(item.nextRetryAtUtc, now));
 
       if (!experiment) {
         continue;
@@ -811,6 +1022,7 @@ export const claimNextExperiment = mutation({
         status: "claimed",
         runNumber,
         claimedAtUtc: now,
+        lastHeartbeatAtUtc: now,
       });
 
       await ctx.db.patch(experiment._id, {
@@ -854,11 +1066,22 @@ export const startRun = mutation({
   },
   handler: async (ctx, { runId, workspacePath }) => {
     const run = await mustGetRun(ctx, runId);
+    if (!ACTIVE_RUN_STATUSES.has(run.status)) {
+      await insertEvent(ctx, {
+        sessionId: run.sessionId,
+        experimentId: run.experimentId,
+        runId,
+        type: "run.start_ignored",
+        message: `Ignored start for ${run.status} run.`,
+      });
+      return;
+    }
     const now = nowUtc();
     await ctx.db.patch(runId, {
       status: "running",
       workspacePath,
       startedAtUtc: now,
+      lastHeartbeatAtUtc: now,
     });
     await ctx.db.patch(run.experimentId, {
       status: "running",
@@ -871,6 +1094,20 @@ export const startRun = mutation({
       type: "run.started",
       message: `Started run in ${workspacePath}`,
     });
+  },
+});
+
+export const heartbeatRun = mutation({
+  args: { runId: v.id("researchRuns") },
+  handler: async (ctx, { runId }) => {
+    const run = await mustGetRun(ctx, runId);
+    if (!ACTIVE_RUN_STATUSES.has(run.status)) {
+      return { status: run.status, accepted: false };
+    }
+    const now = nowUtc();
+    await ctx.db.patch(runId, { lastHeartbeatAtUtc: now });
+    await ctx.db.patch(run.sessionId, { updatedAtUtc: now });
+    return { status: run.status, accepted: true };
   },
 });
 
@@ -1028,6 +1265,9 @@ export const recordPatch = mutation({
   },
   handler: async (ctx, args) => {
     const run = await mustGetRun(ctx, args.runId);
+    if (!ACTIVE_RUN_STATUSES.has(run.status)) {
+      throw new Error(`cannot record patch for ${run.status} run`);
+    }
     const session = await mustGetSession(ctx, run.sessionId);
     const now = nowUtc();
     const status =
@@ -1134,7 +1374,14 @@ export const completeRun = mutation({
   },
   handler: async (ctx, args) => {
     const run = await mustGetRun(ctx, args.runId);
-    if (run.status === "rolled_back") {
+    if (!ACTIVE_RUN_STATUSES.has(run.status)) {
+      await insertEvent(ctx, {
+        sessionId: run.sessionId,
+        experimentId: run.experimentId,
+        runId: args.runId,
+        type: "run.completion_ignored",
+        message: `Ignored completion for ${run.status} run.`,
+      });
       return;
     }
     const patch = await ctx.db.get(args.patchId);
@@ -1165,6 +1412,7 @@ export const completeRun = mutation({
       score,
       summary: args.summary,
       ...(failureReason ? { error: failureReason } : {}),
+      lastHeartbeatAtUtc: now,
       finishedAtUtc: now,
     });
     await ctx.db.patch(run.experimentId, {
@@ -1172,6 +1420,7 @@ export const completeRun = mutation({
       metrics: args.metrics,
       score,
       promoted,
+      nextRetryAtUtc: undefined,
       updatedAtUtc: now,
     });
 
@@ -1217,12 +1466,13 @@ export const failRun = mutation({
   args: {
     runId: v.id("researchRuns"),
     error: v.string(),
+    errorKind: v.optional(v.string()),
     codexExitCode: v.optional(v.float64()),
     benchmarkExitCode: v.optional(v.float64()),
   },
   handler: async (ctx, args) => {
     const run = await mustGetRun(ctx, args.runId);
-    if (run.status === "rolled_back") {
+    if (!ACTIVE_RUN_STATUSES.has(run.status)) {
       return;
     }
     const session = await mustGetSession(ctx, run.sessionId);
@@ -1230,25 +1480,70 @@ export const failRun = mutation({
     await ctx.db.patch(args.runId, {
       status: "failed",
       error: args.error,
+      errorKind: args.errorKind,
       codexExitCode: args.codexExitCode,
       benchmarkExitCode: args.benchmarkExitCode,
+      lastHeartbeatAtUtc: now,
       finishedAtUtc: now,
     });
-    await ctx.db.patch(run.experimentId, {
-      status: "failed",
-      updatedAtUtc: now,
-    });
+    const behavior = agentErrorBehavior(args.errorKind);
+    const retryCount = behavior === "retry" ? nextRetryCount(await ctx.db.get(run.experimentId)) : 0;
+    const experimentPatch =
+      behavior === "retry"
+        ? {
+            status: "queued",
+            activeRunId: undefined,
+            retryCount,
+            nextRetryAtUtc: retryAfterUtc(now, retryCount),
+            updatedAtUtc: now,
+          }
+        : {
+            status: "failed",
+            activeRunId: undefined,
+            nextRetryAtUtc: undefined,
+            updatedAtUtc: now,
+          };
+    await ctx.db.patch(run.experimentId, experimentPatch);
+    const pauseForAgentError = behavior === "pause" || behavior === "quota";
+    if (behavior === "quota") {
+      await setDesiredRunnerCount(ctx, 0, now);
+    }
     await ctx.db.patch(run.sessionId, {
-      completedExperimentCount: session.completedExperimentCount + 1,
+      completedExperimentCount:
+        behavior === "retry"
+          ? session.completedExperimentCount
+          : session.completedExperimentCount + 1,
       activeRunCount: Math.max(0, session.activeRunCount - 1),
+      ...(pauseForAgentError
+        ? { status: "paused", stoppedReason: args.errorKind }
+        : {}),
       updatedAtUtc: now,
     });
+    if (pauseForAgentError) {
+      await insertEvent(ctx, {
+        sessionId: run.sessionId,
+        experimentId: run.experimentId,
+        runId: args.runId,
+        type: "session.paused",
+        message: `Paused session after ${args.errorKind}.`,
+        payload: { errorKind: args.errorKind },
+      });
+    }
     await insertEvent(ctx, {
       sessionId: run.sessionId,
       experimentId: run.experimentId,
       runId: args.runId,
-      type: "run.failed",
-      message: args.error,
+      type: behavior === "retry" ? "run.retry_scheduled" : "run.failed",
+      message:
+        behavior === "retry"
+          ? `Transient agent failure; retry scheduled after ${experimentPatch.nextRetryAtUtc}.`
+          : args.error,
+      payload: {
+        errorKind: args.errorKind,
+        ...(behavior === "retry"
+          ? { retryCount, retryAfterUtc: experimentPatch.nextRetryAtUtc }
+          : {}),
+      },
     });
   },
 });
@@ -1256,6 +1551,14 @@ export const failRun = mutation({
 export const pauseSession = mutation({
   args: { sessionId: v.id("researchSessions") },
   handler: async (ctx, { sessionId }) => {
+    const now = nowUtc();
+    await cancelActivePlanningCycles(ctx, sessionId, {
+      now,
+      status: "cancelled",
+      reason: "Planning cycle cancelled by pause.",
+      eventType: "planning.cancelled",
+    });
+    await reconcileSessionState(ctx, sessionId, { now });
     await patchSessionStatus(
       ctx,
       sessionId,
@@ -1269,12 +1572,27 @@ export const pauseSession = mutation({
 export const stopSession = mutation({
   args: { sessionId: v.id("researchSessions"), reason: v.optional(v.string()) },
   handler: async (ctx, { sessionId, reason }) => {
+    const now = nowUtc();
+    const stopReason = reason ?? "Stopped session.";
+    await cancelActivePlanningCycles(ctx, sessionId, {
+      now,
+      status: "cancelled",
+      reason: stopReason,
+      eventType: "planning.cancelled",
+    });
+    await cancelActiveRuns(ctx, sessionId, {
+      now,
+      status: "cancelled",
+      reason: stopReason,
+      errorKind: "session_stopped",
+    });
+    await reconcileSessionState(ctx, sessionId, { now });
     await patchSessionStatus(
       ctx,
       sessionId,
       "stopped",
       "session.stopped",
-      reason ?? "Stopped session.",
+      stopReason,
       reason,
     );
   },
@@ -1288,11 +1606,23 @@ export const resumeSession = mutation({
   handler: async (ctx, { sessionId, targetExperimentCount }) => {
     const session = await mustGetSession(ctx, sessionId);
     const now = nowUtc();
+    await cancelActivePlanningCycles(ctx, sessionId, {
+      now,
+      status: "cancelled",
+      reason: "Planning cycle cancelled during resume reconciliation.",
+      eventType: "planning.cancelled",
+    });
+    const reconciled = await reconcileSessionState(ctx, sessionId, {
+      now,
+      expireStale: true,
+    });
     await ctx.db.patch(sessionId, {
       status: "running",
       targetExperimentCount:
-        targetExperimentCount ?? session.targetExperimentCount,
+        targetExperimentCount ?? reconciled.session.targetExperimentCount,
       resumeCount: session.resumeCount + 1,
+      planningRetryCount: 0,
+      planningRetryAfterUtc: undefined,
       stoppedReason: "",
       updatedAtUtc: now,
     });
@@ -1302,7 +1632,7 @@ export const resumeSession = mutation({
       message: "Resumed session.",
       payload: {
         targetExperimentCount:
-          targetExperimentCount ?? session.targetExperimentCount,
+          targetExperimentCount ?? reconciled.session.targetExperimentCount,
       },
     });
   },
@@ -1338,6 +1668,8 @@ export const requestMoreExperiments = mutation({
         session.status === "running"
           ? session.resumeCount
           : session.resumeCount + 1,
+      planningRetryCount: 0,
+      planningRetryAfterUtc: undefined,
       stoppedReason: "",
       updatedAtUtc: now,
     });
@@ -1932,23 +2264,62 @@ async function insertExperimentBatch(
     });
   }
 
-  await ctx.db.patch(args.sessionId, {
-    nextExperimentOrdinal: ordinal,
-    updatedAtUtc: now,
-  });
   if (args.planningCycleId) {
     await ctx.db.patch(args.planningCycleId, {
       status: "completed",
       approvedCount: inserted.length,
+      lastHeartbeatAtUtc: now,
       completedAtUtc: now,
     });
   }
+
+  let noAcceptedPlanningCycleStreak = 0;
+  const pauseAfterNoAcceptedPlanningCycles =
+    args.planningCycleId && inserted.length === 0
+      ? planningNoAcceptedExperimentsPatience(session)
+      : 0;
+  if (pauseAfterNoAcceptedPlanningCycles > 0) {
+    noAcceptedPlanningCycleStreak =
+      await consecutivePlanningCyclesWithoutAcceptedExperiments(
+        ctx,
+        args.sessionId,
+      );
+  }
+  const shouldPauseForPlanningEarlyStop =
+    pauseAfterNoAcceptedPlanningCycles > 0 &&
+    noAcceptedPlanningCycleStreak >= pauseAfterNoAcceptedPlanningCycles;
+
+  await ctx.db.patch(args.sessionId, {
+    nextExperimentOrdinal: ordinal,
+    planningRetryCount: 0,
+    planningRetryAfterUtc: undefined,
+    ...(shouldPauseForPlanningEarlyStop
+      ? {
+          status: "paused",
+          stoppedReason: "early_stopping:no_accepted_planning_cycles",
+        }
+      : {}),
+    updatedAtUtc: now,
+  });
   await insertEvent(ctx, {
     sessionId: args.sessionId,
     type: "planning.batch_enqueued",
     message: `Queued ${inserted.length} planned experiments.`,
     payload: { planningCycleId: args.planningCycleId, experimentIds: inserted },
   });
+  if (shouldPauseForPlanningEarlyStop) {
+    await insertEvent(ctx, {
+      sessionId: args.sessionId,
+      type: "session.paused",
+      message: `Paused session after ${noAcceptedPlanningCycleStreak} consecutive planning cycles with no accepted experiments.`,
+      payload: {
+        planningCycleId: args.planningCycleId,
+        stoppedReason: "early_stopping:no_accepted_planning_cycles",
+        noAcceptedPlanningCycleStreak,
+        threshold: pauseAfterNoAcceptedPlanningCycles,
+      },
+    });
+  }
   return inserted;
 }
 
@@ -1981,6 +2352,216 @@ async function firstRunnableSession(
   return null;
 }
 
+async function reconcileSessionState(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+  options: {
+    now?: string;
+    expireStale?: boolean;
+  } = {},
+): Promise<{
+  session: Doc<"researchSessions">;
+  activeRunCount: number;
+  completedExperimentCount: number;
+  expiredRunCount: number;
+}> {
+  const now = options.now ?? nowUtc();
+  let expiredRunCount = 0;
+
+  if (options.expireStale) {
+    expiredRunCount = await expireStaleRuns(ctx, sessionId, now);
+    await expireStalePlanningCycles(ctx, sessionId, now);
+  }
+
+  const session = await mustGetSession(ctx, sessionId);
+  const [runs, experiments] = await Promise.all([
+    ctx.db
+      .query("researchRuns")
+      .withIndex("by_session", (q: any) => q.eq("sessionId", sessionId))
+      .collect(),
+    ctx.db
+      .query("researchExperiments")
+      .withIndex("by_session", (q: any) => q.eq("sessionId", sessionId))
+      .collect(),
+  ]);
+  const activeRunIds = new Set(
+    runs
+      .filter((run: Doc<"researchRuns">) => ACTIVE_RUN_STATUSES.has(run.status))
+      .map((run: Doc<"researchRuns">) => run._id),
+  );
+  const activeRunCount = activeRunIds.size;
+  const completedExperimentCount = experiments.filter((experiment: Doc<"researchExperiments">) =>
+    isCountedExperimentStatus(experiment.status),
+  ).length;
+
+  for (const experiment of experiments) {
+    if (experiment.activeRunId && !activeRunIds.has(experiment.activeRunId)) {
+      await ctx.db.patch(experiment._id, {
+        activeRunId: undefined,
+        updatedAtUtc: now,
+      });
+    }
+  }
+
+  const sessionPatch: Record<string, unknown> = {};
+  if (session.activeRunCount !== activeRunCount) {
+    sessionPatch.activeRunCount = activeRunCount;
+  }
+  if (session.completedExperimentCount !== completedExperimentCount) {
+    sessionPatch.completedExperimentCount = completedExperimentCount;
+  }
+  if (
+    session.status === "running" &&
+    activeRunCount === 0 &&
+    completedExperimentCount >= session.targetExperimentCount
+  ) {
+    sessionPatch.status = "completed";
+  }
+  if (Object.keys(sessionPatch).length > 0) {
+    sessionPatch.updatedAtUtc = now;
+    await ctx.db.patch(sessionId, sessionPatch);
+    await insertEvent(ctx, {
+      sessionId,
+      type: "session.reconciled",
+      message: `Reconciled session state: ${activeRunCount} active, ${completedExperimentCount} counted.`,
+      payload: { ...sessionPatch, expiredRunCount },
+    });
+    return {
+      session: { ...session, ...sessionPatch } as Doc<"researchSessions">,
+      activeRunCount,
+      completedExperimentCount,
+      expiredRunCount,
+    };
+  }
+
+  return { session, activeRunCount, completedExperimentCount, expiredRunCount };
+}
+
+async function expireStaleRuns(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+  now: string,
+): Promise<number> {
+  const runs = await ctx.db
+    .query("researchRuns")
+    .withIndex("by_session", (q: any) => q.eq("sessionId", sessionId))
+    .collect();
+  let expired = 0;
+  for (const run of runs.filter((item: Doc<"researchRuns">) =>
+    ACTIVE_RUN_STATUSES.has(item.status) && isStaleRun(item, now),
+  )) {
+    expired += 1;
+    await ctx.db.patch(run._id, {
+      status: "failed",
+      error: "Run expired after missing worker heartbeats.",
+      errorKind: "worker_stale",
+      finishedAtUtc: now,
+    });
+    await ctx.db.patch(run.experimentId, {
+      status: "failed",
+      activeRunId: undefined,
+      updatedAtUtc: now,
+    });
+    await insertEvent(ctx, {
+      sessionId,
+      experimentId: run.experimentId,
+      runId: run._id,
+      type: "run.expired",
+      message: "Expired stale run after missing worker heartbeats.",
+      payload: {
+        workerId: run.workerId,
+        lastHeartbeatAtUtc: run.lastHeartbeatAtUtc,
+        startedAtUtc: run.startedAtUtc,
+        claimedAtUtc: run.claimedAtUtc,
+      },
+    });
+  }
+  return expired;
+}
+
+async function cancelActiveRuns(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+  options: {
+    now: string;
+    status: string;
+    reason: string;
+    errorKind: string;
+  },
+): Promise<number> {
+  const runs = await ctx.db
+    .query("researchRuns")
+    .withIndex("by_session", (q: any) => q.eq("sessionId", sessionId))
+    .collect();
+  let cancelled = 0;
+  for (const run of runs.filter((item: Doc<"researchRuns">) =>
+    ACTIVE_RUN_STATUSES.has(item.status),
+  )) {
+    cancelled += 1;
+    await ctx.db.patch(run._id, {
+      status: options.status,
+      error: options.reason,
+      errorKind: options.errorKind,
+      lastHeartbeatAtUtc: options.now,
+      finishedAtUtc: options.now,
+    });
+    await ctx.db.patch(run.experimentId, {
+      status: "failed",
+      activeRunId: undefined,
+      updatedAtUtc: options.now,
+    });
+    await insertEvent(ctx, {
+      sessionId,
+      experimentId: run.experimentId,
+      runId: run._id,
+      type: "run.cancelled",
+      message: options.reason,
+      payload: { workerId: run.workerId, previousStatus: run.status },
+    });
+  }
+  return cancelled;
+}
+
+async function cancelActivePlanningCycles(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+  options: {
+    now: string;
+    status: string;
+    reason: string;
+    eventType: string;
+  },
+): Promise<number> {
+  const cycles = await ctx.db
+    .query("researchPlanningCycles")
+    .withIndex("by_status", (q: any) => q.eq("status", "running"))
+    .collect();
+  let cancelled = 0;
+  for (const cycle of cycles.filter(
+    (item: Doc<"researchPlanningCycles">) => item.sessionId === sessionId,
+  )) {
+    cancelled += 1;
+    await ctx.db.patch(cycle._id, {
+      status: options.status,
+      error: options.reason,
+      errorKind: "session_lifecycle",
+      lastHeartbeatAtUtc: options.now,
+      completedAtUtc: options.now,
+    });
+    await insertEvent(ctx, {
+      sessionId,
+      type: options.eventType,
+      message: options.reason,
+      payload: {
+        planningCycleId: cycle._id,
+        plannerWorkerId: cycle.plannerWorkerId,
+        previousStatus: cycle.status,
+      },
+    });
+  }
+  return cancelled;
+}
+
 async function activePlanningCyclesForSession(
   ctx: any,
   sessionId: Id<"researchSessions">,
@@ -2003,6 +2584,7 @@ async function activePlanningCyclesForSession(
     await ctx.db.patch(cycle._id, {
       status: "failed",
       error: "Planning cycle expired without completion.",
+      errorKind: "planner_stale",
       completedAtUtc: now,
     });
     await insertEvent(ctx, {
@@ -2020,16 +2602,44 @@ async function activePlanningCyclesForSession(
   return active;
 }
 
+async function expireStalePlanningCycles(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+  now: string,
+): Promise<number> {
+  const runningBefore = await ctx.db
+    .query("researchPlanningCycles")
+    .withIndex("by_status", (q: any) => q.eq("status", "running"))
+    .collect();
+  const beforeCount = runningBefore.filter(
+    (item: Doc<"researchPlanningCycles">) => item.sessionId === sessionId,
+  ).length;
+  const active = await activePlanningCyclesForSession(ctx, sessionId, now);
+  return Math.max(0, beforeCount - active.length);
+}
+
 function isStalePlanningCycle(
   cycle: Doc<"researchPlanningCycles">,
   now: string,
 ): boolean {
-  const startedAtMs = Date.parse(cycle.startedAtUtc);
+  const startedAtMs = Date.parse(cycle.lastHeartbeatAtUtc ?? cycle.startedAtUtc);
   const nowMs = Date.parse(now);
   return (
     Number.isFinite(startedAtMs) &&
     Number.isFinite(nowMs) &&
     nowMs - startedAtMs > PLANNING_CYCLE_STALE_MS
+  );
+}
+
+function isStaleRun(run: Doc<"researchRuns">, now: string): boolean {
+  const heartbeatAtMs = Date.parse(
+    run.lastHeartbeatAtUtc ?? run.startedAtUtc ?? run.claimedAtUtc,
+  );
+  const nowMs = Date.parse(now);
+  return (
+    Number.isFinite(heartbeatAtMs) &&
+    Number.isFinite(nowMs) &&
+    nowMs - heartbeatAtMs > RUN_STALE_MS
   );
 }
 
@@ -2053,6 +2663,28 @@ async function mustGetSession(
     throw new Error(`missing research session ${sessionId}`);
   }
   return session;
+}
+
+async function findSessionBySlugOrId(
+  ctx: any,
+  value: string,
+): Promise<Doc<"researchSessions"> | null> {
+  const text = value.trim();
+  if (!text) {
+    return null;
+  }
+  const bySlug = await ctx.db
+    .query("researchSessions")
+    .withIndex("by_slug", (q: any) => q.eq("slug", text))
+    .first();
+  if (bySlug) {
+    return bySlug;
+  }
+  try {
+    return await ctx.db.get(text as Id<"researchSessions">);
+  } catch {
+    return null;
+  }
 }
 
 async function mustGetExperiment(
@@ -2173,6 +2805,65 @@ function isCompletedStatus(status: string): boolean {
   return status === "completed" || status === "complete" || status === "ok";
 }
 
+function isCountedExperimentStatus(status: string): boolean {
+  return (
+    status === "completed" ||
+    status === "complete" ||
+    status === "ok" ||
+    status === "failed" ||
+    status === "rejected"
+  );
+}
+
+function agentErrorBehavior(
+  errorKind: string | undefined,
+): "retry" | "quota" | "pause" | "fail" {
+  if (errorKind === TRANSIENT_AGENT_UNAVAILABLE) return "retry";
+  if (errorKind === QUOTA_EXHAUSTED) return "quota";
+  if (errorKind === AUTH_CONFIG_ERROR) return "pause";
+  return "fail";
+}
+
+function isRetryDelayed(value: string | undefined, now: string): boolean {
+  if (!value) return false;
+  const retryAt = Date.parse(value);
+  const nowAt = Date.parse(now);
+  return Number.isFinite(retryAt) && Number.isFinite(nowAt) && retryAt > nowAt;
+}
+
+function retryAfterUtc(now: string, attempt: number): string {
+  const nowMs = Date.parse(now);
+  const baseMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const seconds = Math.min(300, 15 * Math.pow(2, Math.max(0, attempt - 1)));
+  return new Date(baseMs + seconds * 1000).toISOString();
+}
+
+function nextRetryCount(
+  experiment: Doc<"researchExperiments"> | null,
+): number {
+  return Math.max(0, Number(experiment?.retryCount ?? 0)) + 1;
+}
+
+async function setDesiredRunnerCount(ctx: any, desiredRunnerCount: number, now: string) {
+  const existing = await ctx.db
+    .query("researchWorkerControls")
+    .withIndex("by_key", (q: any) => q.eq("key", WORKER_CONTROL_KEY))
+    .first();
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      desiredRunnerCount,
+      updatedAtUtc: now,
+    });
+    return;
+  }
+  await ctx.db.insert("researchWorkerControls", {
+    key: WORKER_CONTROL_KEY,
+    desiredRunnerCount,
+    desiredPlannerCount: 3,
+    updatedAtUtc: now,
+  });
+}
+
 function failureReasonForExperiment(
   experiment: Doc<"researchExperiments">,
   runs: Doc<"researchRuns">[],
@@ -2244,9 +2935,7 @@ function bestExperimentForSession(
     if (!metrics || !constraintsPass(session.metricContract, metrics)) {
       continue;
     }
-    const score = typeof experiment.score === "number"
-      ? experiment.score
-      : scoreMetrics(session.metricContract, metrics);
+    const score = scoreMetrics(session.metricContract, metrics);
     if (!best) {
       best = { experiment, score, metrics };
       continue;
@@ -2638,6 +3327,46 @@ function shouldEarlyStop(
   return nextCompleted >= patience;
 }
 
+function planningNoAcceptedExperimentsPatience(
+  session: Doc<"researchSessions">,
+): number {
+  const config = session.earlyStopping;
+  if (!config || config.enabled !== true) {
+    return 0;
+  }
+  const patience = Number(
+    config.maxPlanningCyclesWithoutAcceptedExperiments ??
+      config.planningNoAcceptedExperimentsPatience ??
+      0,
+  );
+  if (!Number.isFinite(patience) || patience <= 0) {
+    return 0;
+  }
+  return Math.floor(patience);
+}
+
+async function consecutivePlanningCyclesWithoutAcceptedExperiments(
+  ctx: any,
+  sessionId: Id<"researchSessions">,
+): Promise<number> {
+  const cycles = await ctx.db
+    .query("researchPlanningCycles")
+    .withIndex("by_session", (q: any) => q.eq("sessionId", sessionId))
+    .order("desc")
+    .take(100);
+  let count = 0;
+  for (const cycle of cycles) {
+    if (cycle.status !== "completed") {
+      break;
+    }
+    if (Number(cycle.approvedCount ?? 0) > 0) {
+      break;
+    }
+    count += 1;
+  }
+  return count;
+}
+
 type AgentUsageRow = {
   role: string;
   source: string;
@@ -2694,6 +3423,45 @@ function sumDefined(values: Array<number | undefined>): number | undefined {
     return undefined;
   }
   return numbers.reduce((sum, value) => sum + value, 0);
+}
+
+function experimentSearchText(experiment: Doc<"researchExperiments">): string {
+  return [
+    experiment.status,
+    experiment.changeKind,
+    experiment.hypothesis,
+    experiment.prompt,
+    JSON.stringify(experiment.metrics ?? {}),
+  ].join("\n").toLowerCase();
+}
+
+function metricFilterMatches(
+  metrics: Record<string, number> | undefined,
+  name: string,
+  op: string,
+  expected: number,
+): boolean {
+  const actual = metrics?.[name];
+  if (typeof actual !== "number") {
+    return false;
+  }
+  switch (op) {
+    case ">":
+      return actual > expected;
+    case ">=":
+      return actual >= expected;
+    case "<":
+      return actual < expected;
+    case "<=":
+      return actual <= expected;
+    case "=":
+    case "==":
+      return actual === expected;
+    case "!=":
+      return actual !== expected;
+    default:
+      throw new Error(`Unsupported metric comparison operator: ${op}`);
+  }
 }
 
 function normalizeInteger(

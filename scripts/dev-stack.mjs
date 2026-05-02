@@ -8,14 +8,22 @@ import { ConvexHttpClient } from "convex/browser";
 import { api } from "../convex/_generated/api.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const STACK_STATE_PATH = path.join(ROOT, ".autoresearch", "runtime", "stack.json");
 const DEFAULT_CONVEX_URL = "http://127.0.0.1:3210";
-const DEFAULT_FRONTEND_PORT = 5173;
+const DEFAULT_DEV_FRONTEND_PORT = 5173;
+const DEFAULT_PREVIEW_FRONTEND_PORT = 4173;
 
 let stopping = false;
 const processGroups = new Set();
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    printHelp();
+    return;
+  }
+  writeStackState(args);
+  process.once("exit", clearStackState);
   const envPath = path.join(ROOT, ".env.local");
   const envFile = loadEnvFile(envPath);
   let convexUrl =
@@ -36,12 +44,18 @@ async function main() {
     convexUrl = await waitForConvexReady(envPath, convexUrl, convex.child);
   }
 
-  const frontend = spawnManaged("frontend", localBin("vite"), [
-    "--host",
-    "127.0.0.1",
-    "--port",
-    String(args.frontendPort ?? DEFAULT_FRONTEND_PORT)
-  ], {
+  const frontendMode = args.frontendMode ?? "dev";
+  if (frontendMode === "preview") {
+    await runBuild(convexUrl);
+  }
+  const frontendPort =
+    args.frontendPort ??
+    (frontendMode === "preview" ? DEFAULT_PREVIEW_FRONTEND_PORT : DEFAULT_DEV_FRONTEND_PORT);
+  const frontendArgs =
+    frontendMode === "preview"
+      ? ["preview", "--host", "127.0.0.1", "--port", String(frontendPort)]
+      : ["--host", "127.0.0.1", "--port", String(frontendPort)];
+  const frontend = spawnManaged("frontend", localBin("vite"), frontendArgs, {
     env: {
       ...process.env,
       CONVEX_URL: convexUrl,
@@ -289,6 +303,32 @@ function printStackUrls({ convexUrl, frontendUrl }) {
   console.log("");
 }
 
+function writeStackState(args) {
+  fs.mkdirSync(path.dirname(STACK_STATE_PATH), { recursive: true });
+  const frontendMode = args.frontendMode ?? "dev";
+  fs.writeFileSync(
+    STACK_STATE_PATH,
+    `${JSON.stringify({
+      pid: process.pid,
+      root: ROOT,
+      frontendMode,
+      argv: process.argv.slice(2),
+      startedAtUtc: new Date().toISOString()
+    }, null, 2)}\n`
+  );
+}
+
+function clearStackState() {
+  try {
+    const state = JSON.parse(fs.readFileSync(STACK_STATE_PATH, "utf8"));
+    if (state?.pid === process.pid) {
+      fs.rmSync(STACK_STATE_PATH, { force: true });
+    }
+  } catch {
+    // A newer stack may already have replaced the state file.
+  }
+}
+
 async function shutdown(supervisor, code) {
   if (stopping) {
     return;
@@ -317,6 +357,31 @@ function localBin(name) {
   const suffix = process.platform === "win32" ? ".cmd" : "";
   const candidate = path.join(ROOT, "node_modules", ".bin", `${name}${suffix}`);
   return fs.existsSync(candidate) ? candidate : name;
+}
+
+async function runBuild(convexUrl) {
+  console.log("[frontend] building production frontend");
+  await runCommand(localBin("tsc"), ["-b"], { convexUrl });
+  await runCommand(localBin("vite"), ["build"], { convexUrl });
+}
+
+function runCommand(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        CONVEX_URL: options.convexUrl ?? process.env.CONVEX_URL,
+        VITE_CONVEX_URL: options.convexUrl ?? process.env.VITE_CONVEX_URL
+      },
+      stdio: "inherit"
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} ${args.join(" ")} exited with ${code}`));
+    });
+  });
 }
 
 async function canConnectUrl(urlString) {
@@ -361,6 +426,10 @@ function parseArgs(argv) {
   const parsed = { reuse: true, workers: true };
   for (let index = 0; index < argv.length; index += 1) {
     const item = argv[index];
+    if (item === "--help" || item === "-h") {
+      parsed.help = true;
+      continue;
+    }
     if (item === "--no-reuse") {
       parsed.reuse = false;
       continue;
@@ -377,11 +446,38 @@ function parseArgs(argv) {
       parsed.frontendPort = Number(argv[++index]);
       continue;
     }
+    if (item === "--frontend-mode") {
+      parsed.frontendMode = parseFrontendMode(argv[++index]);
+      continue;
+    }
     if (item === "--worker-poll-ms") {
       parsed.workerPollMs = Number(argv[++index]);
+      continue;
     }
+    throw new Error(`Unknown stack option: ${item}`);
   }
   return parsed;
+}
+
+function parseFrontendMode(value) {
+  if (value === "dev" || value === "preview") {
+    return value;
+  }
+  throw new Error("--frontend-mode must be dev or preview");
+}
+
+function printHelp() {
+  console.log(`Usage:
+  autoresearch dev [stack options]
+  autoresearch run [stack options]
+
+Stack options:
+  --convex-url URL        Convex deployment URL.
+  --frontend-port N       Frontend port.
+  --frontend-mode MODE    dev or preview.
+  --no-reuse              Force a fresh Convex process.
+  --no-workers            Disable the worker supervisor.
+  --worker-poll-ms N      Worker supervisor polling interval.`);
 }
 
 function clampInteger(value, min, max) {

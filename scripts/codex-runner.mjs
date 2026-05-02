@@ -77,6 +77,7 @@ async function main() {
       continue;
     }
 
+    const heartbeat = startRunHeartbeat(client, claim.runId);
     try {
       await runClaim(client, claim, args);
     } catch (error) {
@@ -84,8 +85,11 @@ async function main() {
       console.error(message);
       await client.mutation(api.orchestration.failRun, {
         runId: claim.runId,
-        error: message.slice(0, 4000)
+        error: message.slice(0, 4000),
+        errorKind: classifyAgentError(message)
       });
+    } finally {
+      heartbeat.stop();
     }
 
     if (args.once) {
@@ -369,6 +373,27 @@ async function runClaim(client, claim, args) {
   });
 }
 
+function startRunHeartbeat(client, runId) {
+  let stopped = false;
+  const beat = () => {
+    if (stopped) return;
+    client
+      .mutation(api.orchestration.heartbeatRun, { runId })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`failed to heartbeat run ${runId}: ${message}`);
+      });
+  };
+  beat();
+  const timer = setInterval(beat, 15000);
+  return {
+    stop() {
+      stopped = true;
+      clearInterval(timer);
+    }
+  };
+}
+
 async function failRunAndRemember(client, {
   runId,
   session,
@@ -385,6 +410,7 @@ async function failRunAndRemember(client, {
   await client.mutation(api.orchestration.failRun, {
     runId,
     error,
+    errorKind: classifyAgentError(error),
     codexExitCode,
     benchmarkExitCode
   });
@@ -405,6 +431,23 @@ async function failRunAndRemember(client, {
     },
     patch
   });
+}
+
+function classifyAgentError(value) {
+  const text = String(value ?? "").toLowerCase();
+  if (/\b(401|403|unauthorized|forbidden|auth|api key|credential|permission denied|not logged in|login required|invalid api key|missing api key|config error|configuration error|misconfigured)\b/u.test(text)) {
+    return "auth/config_error";
+  }
+  if (/\b(429|rate limit|rate_limit|too many requests|quota|insufficient_quota|usage limit|credit|billing|out of credits)\b/u.test(text)) {
+    return "quota_exhausted";
+  }
+  if (/\b(503|502|504|unavailable|overloaded|capacity|temporarily unavailable|try again later)\b/u.test(text)) {
+    return "transient_agent_unavailable";
+  }
+  if (/\b(timeout|timed out|idle timeout|deadline|etimedout|econnreset|network)\b/u.test(text)) {
+    return "transient_agent_unavailable";
+  }
+  return "agent_failed_task";
 }
 
 async function maybeRunMemoryKeeper({
@@ -709,7 +752,7 @@ function prepareWorkspace({ session, basePatch, experiment, runId, args }) {
   return destination;
 }
 
-function applyWorkspaceLinks(workspacePath, links) {
+export function applyWorkspaceLinks(workspacePath, links) {
   for (const link of normalizeWorkspaceLinks(links)) {
     const linkPath = safeResolveWorkspacePath(workspacePath, link.workspacePath);
     const targetPath = path.resolve(link.targetPath);
@@ -721,7 +764,7 @@ function applyWorkspaceLinks(workspacePath, links) {
       if (existing.isSymbolicLink() && path.resolve(path.dirname(linkPath), fs.readlinkSync(linkPath)) === targetPath) {
         continue;
       }
-      throw new Error(`workspace link path already exists: ${link.workspacePath}`);
+      fs.rmSync(linkPath, { recursive: true, force: true });
     }
     fs.mkdirSync(path.dirname(linkPath), { recursive: true });
     const targetStat = fs.statSync(targetPath);
@@ -1936,7 +1979,7 @@ function bufferToArrayBuffer(buffer) {
   return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
 }
 
-function collectPatch(workspacePath, session, baseRef = "HEAD") {
+export function collectPatch(workspacePath, session, baseRef = "HEAD") {
   const entries = changedEntriesFromGit(workspacePath, baseRef).filter((entry) => shouldIncludePatchFile(workspacePath, entry.file, session));
   const changedFiles = entries.map((entry) => entry.file);
   const rejectedFiles = changedFiles.filter((file) => !isEditable(file, session.editablePaths));
@@ -1973,7 +2016,13 @@ function isWorkspaceLink(file, links) {
 
 function isPatchOutputArtifact(file) {
   const normalized = normalizeRelativePath(file);
-  return normalized === "artifacts" || normalized.startsWith("artifacts/");
+  const isNestedSessionArtifact =
+    normalized.startsWith(".autoresearch/sessions/") && normalized.includes("/artifacts/");
+  return (
+    normalized === "artifacts" ||
+    normalized.startsWith("artifacts/") ||
+    isNestedSessionArtifact
+  );
 }
 
 function isRenderedTexArtifact(workspacePath, file) {

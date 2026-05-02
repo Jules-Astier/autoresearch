@@ -302,7 +302,7 @@ body.lab-frontier-scroll-locked {
   border-radius: var(--r-md);
   border: 1px solid var(--rule-soft);
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   overscroll-behavior: contain;
   touch-action: none;
 }
@@ -311,6 +311,7 @@ body.lab-frontier-scroll-locked {
   top: 10px;
   right: 10px;
   display: flex;
+  align-items: center;
   gap: 4px;
   background: var(--paper-1);
   border: 1px solid var(--rule-soft);
@@ -330,6 +331,70 @@ body.lab-frontier-scroll-locked {
 .lab-ledger .scale-toggle.active {
   background: var(--amber-soft);
   color: var(--ink-1);
+}
+.lab-ledger .frontier-metric-picker {
+  position: relative;
+}
+.lab-ledger .metric-picker-toggle {
+  width: auto !important;
+  min-width: 34px;
+  gap: 5px;
+  padding: 0 8px;
+  font-family: var(--face-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.lab-ledger .metric-picker-toggle.active,
+.lab-ledger .metric-picker-toggle:not(:disabled):hover {
+  background: var(--amber-soft);
+  color: var(--ink-1);
+}
+.lab-ledger .frontier-metric-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: -4px;
+  width: min(280px, calc(100vw - 48px));
+  max-height: 260px;
+  overflow: auto;
+  padding: 6px;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sheet);
+  z-index: 6;
+}
+.lab-ledger .frontier-metric-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.lab-ledger .frontier-metric-option:hover {
+  background: var(--paper-1);
+  color: var(--ink-1);
+}
+.lab-ledger .frontier-metric-option input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--amber);
+}
+.lab-ledger .frontier-metric-option-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--face-mono);
+  font-size: 12px;
+}
+.lab-ledger .frontier-metric-option-meta {
+  font-family: var(--face-mono);
+  font-size: 10px;
+  color: var(--ink-4);
+  white-space: nowrap;
 }
 .lab-ledger .frontier-chart-yaxis {
   height: 236px;
@@ -364,6 +429,49 @@ body.lab-frontier-scroll-locked {
 .lab-ledger .frontier-chart-tooltip .delta { margin-left: 6px; }
 .lab-ledger .frontier-chart-tooltip .delta.up   { color: #b0d18a; }
 .lab-ledger .frontier-chart-tooltip .delta.down { color: #e7a59a; }
+.lab-ledger .frontier-chart-tooltip-metrics {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(251, 247, 234, 0.18);
+}
+.lab-ledger .frontier-chart-tooltip-metrics div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+.lab-ledger .frontier-chart-tooltip-metrics strong {
+  font-weight: 500;
+  color: var(--paper-2);
+}
+.lab-ledger .frontier-chart-legend {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 7px 12px 10px 68px;
+  border-top: 1px solid var(--rule-soft);
+  background: rgba(251, 247, 234, 0.72);
+}
+.lab-ledger .frontier-chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  font-family: var(--face-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.lab-ledger .frontier-chart-legend-line {
+  width: 18px;
+  height: 2px;
+  background: repeating-linear-gradient(
+    90deg,
+    currentColor 0 5px,
+    transparent 5px 8px
+  );
+  color: var(--sepia);
+}
 .lab-ledger .frontier-chart-meta {
   display: flex;
   justify-content: space-between;
@@ -421,6 +529,92 @@ body.lab-frontier-scroll-locked {
   font-size: 22px;
   color: var(--ink-4);
   font-style: italic;
+}
+
+/* ── metric priority ──────────────────────────────────────── */
+.lab-ledger .metric-priority-panel {
+  margin-top: 16px;
+  padding: 16px 18px;
+  background: var(--paper-edge);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-md);
+}
+.lab-ledger .metric-priority-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.lab-ledger .metric-priority-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--face-cond);
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--ink-1);
+}
+.lab-ledger .metric-priority-meta {
+  margin-top: 3px;
+  font-family: var(--face-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.lab-ledger .metric-priority-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.lab-ledger .metric-priority-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 8px 8px 10px;
+  background: var(--paper-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
+}
+.lab-ledger .metric-priority-rank {
+  font-family: var(--face-mono);
+  font-size: 12px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.lab-ledger .metric-priority-body {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.lab-ledger .metric-priority-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--face-mono);
+  font-size: 12px;
+  color: var(--ink-1);
+}
+.lab-ledger .metric-priority-direction {
+  font-family: var(--face-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.lab-ledger .metric-priority-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+.lab-ledger .metric-priority-actions .icon-btn {
+  width: 28px;
+  height: 28px;
+  background: transparent;
 }
 
 /* ── section ───────────────────────────────────────────────── */
@@ -929,6 +1123,87 @@ body.lab-frontier-scroll-locked {
   color: var(--ink-2);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+.lab-ledger .cycle-agent-responses {
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
+  background: var(--paper-1);
+  overflow: hidden;
+}
+.lab-ledger .cycle-agent-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid var(--rule-soft);
+  background: var(--paper-edge);
+}
+.lab-ledger .cycle-agent-tab {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 0;
+  border-right: 1px solid var(--rule-soft);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-family: var(--face-mono);
+  font-size: 10.5px;
+  text-align: left;
+}
+.lab-ledger .cycle-agent-tab:last-child {
+  border-right: 0;
+}
+.lab-ledger .cycle-agent-tab:hover {
+  background: var(--paper-2);
+}
+.lab-ledger .cycle-agent-tab.is-active {
+  background: var(--paper-1);
+  color: var(--ink-1);
+}
+.lab-ledger .cycle-agent-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--rule-strong);
+}
+.lab-ledger .cycle-agent-tab.researcher .cycle-agent-tab-dot,
+.lab-ledger .cycle-agent-panel.researcher {
+  border-left-color: var(--sepia);
+}
+.lab-ledger .cycle-agent-tab.researcher .cycle-agent-tab-dot {
+  background: var(--sepia);
+}
+.lab-ledger .cycle-agent-tab.planner .cycle-agent-tab-dot,
+.lab-ledger .cycle-agent-panel.planner {
+  border-left-color: var(--moss);
+}
+.lab-ledger .cycle-agent-tab.planner .cycle-agent-tab-dot {
+  background: var(--moss);
+}
+.lab-ledger .cycle-agent-tab.reviewer .cycle-agent-tab-dot,
+.lab-ledger .cycle-agent-panel.reviewer {
+  border-left-color: var(--amber);
+}
+.lab-ledger .cycle-agent-tab.reviewer .cycle-agent-tab-dot {
+  background: var(--amber);
+}
+.lab-ledger .cycle-agent-tab > span:nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lab-ledger .cycle-agent-tab-state {
+  color: var(--ink-4);
+  font-size: 9.5px;
+}
+.lab-ledger .cycle-agent-panel {
+  max-height: 260px;
+  overflow: auto;
+  border-left: 2px solid var(--rule-strong);
+  padding: 9px 10px;
 }
 .lab-ledger .msg-row {
   padding: 10px;

@@ -28,6 +28,10 @@
     "memoryKeeper": { "enabled": true }
   },
   "sandbox": { "environment": "none" },
+  "earlyStopping": {
+    "enabled": true,
+    "maxPlanningCyclesWithoutAcceptedExperiments": 3
+  },
   "metricContract": {
     "rankingMode": "lexicographic",
     "metrics": [

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Maximize2, Minus, Plus } from "lucide-react";
+import { ListChecks, Maximize2, Minus, Plus } from "lucide-react";
 import {
   formatMetricValue,
   formatDelta,
@@ -21,10 +21,17 @@ type Point = {
   ordinal: number;
   value: number;
   runningBest: number;
+  metrics: Record<string, number>;
   promoted: boolean;
   isHighWater: boolean;
   experimentId: string;
   sourceCount: number;
+};
+
+type MetricOption = {
+  name: string;
+  direction: "maximize" | "minimize";
+  measured: number;
 };
 
 const DEFAULT_PX = 44;
@@ -56,6 +63,7 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
         ordinal: e.ordinal,
         value: v,
         runningBest: best as number,
+        metrics: e.metrics ?? {},
         promoted: e.promoted,
         isHighWater: beats,
         experimentId: e._id,
@@ -77,6 +85,41 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
 
   const empty = trajectory.length === 0 || !topObjective;
   const sourcedMeasured = trajectory.filter((point) => point.sourceCount > 0).length;
+  const extraMetricOptions: MetricOption[] = useMemo(() => {
+    const names = new Set<string>();
+    const contractMetrics = Array.isArray(session?.metricContract?.metrics)
+      ? session.metricContract.metrics
+      : [];
+    for (const metric of contractMetrics) {
+      if (metric?.name) names.add(String(metric.name));
+    }
+    for (const experiment of experiments) {
+      for (const [name, value] of Object.entries(experiment.metrics ?? {})) {
+        if (typeof value === "number" && Number.isFinite(value)) names.add(name);
+      }
+    }
+    names.delete(topObjective);
+    return [...names]
+      .map((name) => ({
+        name,
+        direction: metricDirection(session?.metricContract, name),
+        measured: experiments.filter(
+          (experiment) =>
+            typeof experiment.metrics?.[name] === "number" &&
+            Number.isFinite(experiment.metrics[name]),
+        ).length,
+      }))
+      .filter((metric) => metric.measured > 0)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [experiments, session?.metricContract, topObjective]);
+  const [selectedExtraMetrics, setSelectedExtraMetrics] = useState<string[]>([]);
+
+  useEffect(() => {
+    const valid = new Set(extraMetricOptions.map((metric) => metric.name));
+    setSelectedExtraMetrics((selected) =>
+      selected.filter((metricName) => valid.has(metricName)),
+    );
+  }, [extraMetricOptions]);
 
   return (
     <section className="frontier" aria-label="Frontier - top objective trajectory">
@@ -121,7 +164,20 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
       ) : null}
 
       {!empty ? (
-        <Chart points={trajectory} direction={direction} onSelect={onSelectExperiment} />
+        <Chart
+          points={trajectory}
+          direction={direction}
+          extraMetricOptions={extraMetricOptions}
+          selectedExtraMetrics={selectedExtraMetrics}
+          onToggleExtraMetric={(metricName) => {
+            setSelectedExtraMetrics((selected) =>
+              selected.includes(metricName)
+                ? selected.filter((name) => name !== metricName)
+                : [...selected, metricName],
+            );
+          }}
+          onSelect={onSelectExperiment}
+        />
       ) : null}
     </section>
   );
@@ -130,10 +186,16 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
 function Chart({
   points,
   direction,
+  extraMetricOptions,
+  selectedExtraMetrics,
+  onToggleExtraMetric,
   onSelect,
 }: {
   points: Point[];
   direction: "maximize" | "minimize";
+  extraMetricOptions: MetricOption[];
+  selectedExtraMetrics: string[];
+  onToggleExtraMetric: (metricName: string) => void;
   onSelect?: (experimentId: string) => void;
 }) {
   const chartRef = useRef<HTMLDivElement | null>(null);
@@ -141,14 +203,30 @@ function Chart({
   const [hover, setHover] = useState<{ point: Point; left: number; top: number } | null>(null);
   const [pxPerPoint, setPxPerPoint] = useState<number>(DEFAULT_PX);
   const [logScale, setLogScale] = useState<boolean>(false);
+  const [metricMenuOpen, setMetricMenuOpen] = useState<boolean>(false);
+  const selectedMetricSet = useMemo(
+    () => new Set(selectedExtraMetrics),
+    [selectedExtraMetrics],
+  );
+  const selectedMetricOptions = extraMetricOptions.filter((metric) =>
+    selectedMetricSet.has(metric.name),
+  );
 
   // log requires all positive values; if any are <= 0 we silently fall back
-  const canLog = points.every((p) => p.value > 0 && p.runningBest > 0);
+  const overlayValues = selectedExtraMetrics.flatMap((metricName) =>
+    points
+      .map((point) => point.metrics[metricName])
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value)),
+  );
+  const canLog = points.every((p) => p.value > 0 && p.runningBest > 0) && overlayValues.every((value) => value > 0);
   const useLog = logScale && canLog;
   const tx = (v: number) => (useLog ? Math.log10(v) : v);
 
   // bounds — include both raw values and the running best
-  const allValues = points.flatMap((p) => [tx(p.value), tx(p.runningBest)]);
+  const allValues = points
+    .flatMap((p) => [p.value, p.runningBest, ...selectedExtraMetrics.map((name) => p.metrics[name])])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .map(tx);
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
   const span = max - min || Math.abs(max) || 1;
@@ -278,6 +356,26 @@ function Chart({
 
   const path = points.map((p, i) => `${i === 0 ? "M" : "L"} ${xOf(i)} ${yOf(p.value)}`).join(" ");
   const bestPath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${xOf(i)} ${yOf(p.runningBest)}`).join(" ");
+  const overlaySeries = selectedMetricOptions
+    .map((metric, metricIndex) => {
+      const segments: string[] = [];
+      let drawing = false;
+      points.forEach((point, pointIndex) => {
+        const value = point.metrics[metric.name];
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          drawing = false;
+          return;
+        }
+        segments.push(`${drawing ? "L" : "M"} ${xOf(pointIndex)} ${yOf(value)}`);
+        drawing = true;
+      });
+      return {
+        ...metric,
+        color: extraMetricColor(metricIndex),
+        path: segments.join(" "),
+      };
+    })
+    .filter((series) => series.path.length > 0);
   const totalWidth = baseWidth + 24;
 
   // x-axis ordinal labels — sparse, density-aware
@@ -312,7 +410,7 @@ function Chart({
   }
 
   return (
-    <div className="frontier-chart" ref={chartRef} aria-label="top objective chart">
+    <div className="frontier-chart" ref={chartRef} aria-label="objective and metric chart">
       <div className="frontier-chart-yaxis">
         <svg width={56} height={CHART_H}>
           {yTicks.map((tickValue, i) => (
@@ -361,6 +459,20 @@ function Chart({
 
           {/* raw value path — faint */}
           <path d={path} fill="none" stroke="rgba(56, 38, 12, 0.22)" strokeWidth={1.25} />
+
+          {/* optional metric overlays */}
+          {overlaySeries.map((series) => (
+            <path
+              key={series.name}
+              d={series.path}
+              fill="none"
+              stroke={series.color}
+              strokeWidth={1.6}
+              strokeDasharray="5 5"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+            />
+          ))}
 
           {/* high-water line */}
           <path
@@ -434,12 +546,78 @@ function Chart({
                 sources {hover.point.sourceCount}
               </span>
             ) : null}
+            {selectedMetricOptions.length > 0 ? (
+              <div className="frontier-chart-tooltip-metrics">
+                {selectedMetricOptions.map((metric, index) => {
+                  const value = hover.point.metrics[metric.name];
+                  return typeof value === "number" && Number.isFinite(value) ? (
+                    <div key={metric.name}>
+                      <span style={{ color: extraMetricColor(index) }}>{metric.name}</span>
+                      <strong>{formatMetricValue(value)}</strong>
+                    </div>
+                  ) : null;
+                })}
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>
 
+      {overlaySeries.length > 0 ? (
+        <div className="frontier-chart-legend" aria-label="selected metric overlays">
+          {overlaySeries.map((series) => (
+            <span key={series.name} className="frontier-chart-legend-item">
+              <span
+                className="frontier-chart-legend-line"
+                style={{ background: series.color }}
+              />
+              {series.name}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
       {/* floating chart controls */}
-      <div className="frontier-chart-controls" aria-hidden="true">
+      <div className="frontier-chart-controls">
+        <div className="frontier-metric-picker">
+          <button
+            type="button"
+            className={`lineage-ctrl metric-picker-toggle${metricMenuOpen ? " active" : ""}`}
+            onClick={() => setMetricMenuOpen((open) => !open)}
+            title="Select extra metrics"
+            aria-expanded={metricMenuOpen}
+            aria-controls="frontier-extra-metrics"
+            disabled={extraMetricOptions.length === 0}
+          >
+            <ListChecks size={14} />
+            <span>{selectedExtraMetrics.length || "metrics"}</span>
+          </button>
+          {metricMenuOpen && extraMetricOptions.length > 0 ? (
+            <div
+              id="frontier-extra-metrics"
+              className="frontier-metric-menu"
+              role="menu"
+              aria-label="Extra metrics"
+            >
+              {extraMetricOptions.map((metric) => {
+                const checked = selectedMetricSet.has(metric.name);
+                return (
+                  <label key={metric.name} className="frontier-metric-option">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => onToggleExtraMetric(metric.name)}
+                    />
+                    <span className="frontier-metric-option-name">{metric.name}</span>
+                    <span className="frontier-metric-option-meta">
+                      {metric.direction} · {metric.measured}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
         <button type="button" className="lineage-ctrl" onClick={zoomIn} title="Zoom in (fewer points across)">
           <Plus size={14} />
         </button>
@@ -461,4 +639,14 @@ function Chart({
       </div>
     </div>
   );
+}
+
+function extraMetricColor(index: number): string {
+  return [
+    "var(--moss)",
+    "var(--oxblood)",
+    "var(--sepia)",
+    "#3d6f83",
+    "#7b5ba7",
+  ][index % 5];
 }
