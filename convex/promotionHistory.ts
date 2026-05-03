@@ -1,6 +1,7 @@
 export type MetricContractLike = {
   rankingMode?: unknown;
   primaryMetric?: unknown;
+  direction?: unknown;
   metrics?: unknown;
 };
 
@@ -9,7 +10,13 @@ export type PromotionCandidate = {
   ordinal?: number;
   status: string;
   metrics?: Record<string, number>;
+  promoted?: boolean;
   score?: number;
+};
+
+export type PromotionSwitchEvent = {
+  type?: unknown;
+  payload?: unknown;
 };
 
 export function promotionMilestoneIdsForSession(
@@ -41,6 +48,75 @@ export function promotionMilestoneIdsForSession(
       milestoneIds.add(candidate.id);
       bestScore = score;
       bestMetrics = candidate.metrics;
+    }
+  }
+
+  return milestoneIds;
+}
+
+export function promotionMilestoneIdsForDisplay(
+  contract: MetricContractLike,
+  candidates: PromotionCandidate[],
+  events: PromotionSwitchEvent[] = [],
+): Set<string> {
+  if (!hasBestExperimentGuardrail(contract)) {
+    return promotionMilestoneIdsForSession(contract, candidates);
+  }
+
+  const persistedMilestoneIds = new Set(
+    candidates
+      .filter((candidate) => candidate.promoted)
+      .map((candidate) => candidate.id),
+  );
+  if (persistedMilestoneIds.size > 0) {
+    return persistedMilestoneIds;
+  }
+
+  const milestoneIds = new Set<string>();
+  const switches = events
+    .filter((event) => event?.type === "metric_policy.switched")
+    .sort((a, b) =>
+      String((a as any).createdAtUtc ?? "").localeCompare(
+        String((b as any).createdAtUtc ?? ""),
+      ),
+    );
+
+  for (const event of switches) {
+    const payload = isRecord(event.payload) ? event.payload : {};
+    const previousMetric =
+      stringValue(payload.fromObjective) ??
+      stringValue(payload.preserveMetric) ??
+      guardedMetricName(contract);
+    if (!previousMetric) {
+      continue;
+    }
+    const sourceExperimentId = stringValue(payload.sourceExperimentId);
+    const sourceOrdinal =
+      sourceExperimentId === undefined
+        ? undefined
+        : candidates.find((candidate) => candidate.id === sourceExperimentId)?.ordinal;
+    const previousContract = singleMetricContract(contract, previousMetric);
+    for (const id of promotionMilestoneIdsForSession(
+      previousContract,
+      candidates.filter(
+        (candidate) =>
+          sourceOrdinal === undefined ||
+          Number(candidate.ordinal ?? 0) <= sourceOrdinal,
+      ),
+    )) {
+      milestoneIds.add(id);
+    }
+  }
+
+  if (milestoneIds.size === 0) {
+    const previousMetric = guardedMetricName(contract);
+    if (previousMetric) {
+      for (const id of promotionMilestoneIdsForSession(
+        singleMetricContract(contract, previousMetric),
+        candidates,
+      )) {
+        milestoneIds.add(id);
+      }
     }
   }
 
@@ -159,6 +235,49 @@ function isObjectiveMetricSpec(spec: any): boolean {
   return String(spec?.role ?? "objective") !== "constraint";
 }
 
+function hasBestExperimentGuardrail(contract: MetricContractLike): boolean {
+  const specs = Array.isArray(contract?.metrics) ? contract.metrics : [];
+  return specs.some(
+    (spec: any) =>
+      spec?.guardrail &&
+      String(spec.guardrail.source ?? "") === "best_experiment",
+  );
+}
+
+function guardedMetricName(contract: MetricContractLike): string | undefined {
+  const specs = Array.isArray(contract?.metrics) ? contract.metrics : [];
+  const guardedSpec = specs.find(
+    (spec: any) =>
+      spec?.guardrail &&
+      String(spec.guardrail.source ?? "") === "best_experiment",
+  );
+  return stringValue(guardedSpec?.guardrail?.sourceMetric) ?? stringValue(guardedSpec?.name);
+}
+
+function singleMetricContract(
+  contract: MetricContractLike,
+  metricName: string,
+): MetricContractLike {
+  const specs = Array.isArray(contract?.metrics) ? contract.metrics : [];
+  const spec = specs.find((candidate: any) => String(candidate?.name) === metricName);
+  return {
+    ...contract,
+    rankingMode: "single_primary",
+    primaryMetric: metricName,
+    direction: spec?.direction,
+    metrics: [
+      {
+        ...(spec ?? {}),
+        name: metricName,
+        role: "objective",
+        guardrail: undefined,
+        min: undefined,
+        max: undefined,
+      },
+    ],
+  };
+}
+
 function constraintsPass(
   contract: MetricContractLike,
   metrics: Record<string, number>,
@@ -184,4 +303,12 @@ function constraintsPass(
 
 function isCompletedStatus(status: string): boolean {
   return status === "completed" || status === "complete" || status === "ok";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }

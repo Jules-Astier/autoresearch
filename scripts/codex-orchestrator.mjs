@@ -106,12 +106,12 @@ function classifyAgentError(value) {
 }
 
 async function runPlanningCycle(client, claim, args) {
-  const { session, experiments, patches, requestedCount, planningCycleId } = claim;
+  const { session, experiments, patches, requestedCount, planningCycleId, memoryNotes } = claim;
   const repoPath = path.resolve(ROOT, session.repoPath);
   const cycleDir = path.join(DEFAULT_WORKSPACE_ROOT, slug(session.slug), String(Date.now()));
   fs.mkdirSync(cycleDir, { recursive: true });
 
-  const memorySnapshot = readMemorySnapshot(repoPath, session.memory);
+  const memorySnapshot = readMemorySnapshot(repoPath, session.memory, memoryNotes);
   const researcherOutput = shouldRunResearcher(session)
     ? await runOrchestratorAgent({
         client,
@@ -620,9 +620,15 @@ function normalizeMemoryRoleConfig(value, defaultEnabled) {
   return { enabled: defaultEnabled };
 }
 
-function readMemorySnapshot(repoPath, value) {
+function readMemorySnapshot(repoPath, value, activeMemoryNotes = null) {
   const memory = normalizeMemoryConfig(value);
   if (!memory) return [];
+  if (Array.isArray(activeMemoryNotes)) {
+    return activeMemoryNotes
+      .filter((note) => note.status !== "rolled_back")
+      .map(formatMemoryNoteSnapshot)
+      .sort((a, b) => a.path.localeCompare(b.path));
+  }
   const paths = [
     memory.notesPath,
     memory.doNotRepeatPath,
@@ -633,6 +639,27 @@ function readMemorySnapshot(repoPath, value) {
   ];
   const uniquePaths = [...new Set(paths.filter(Boolean))];
   return uniquePaths.map((relativePath) => summarizeMemoryPath(repoPath, relativePath));
+}
+
+function formatMemoryNoteSnapshot(note) {
+  if (note.kind === "file") {
+    return {
+      path: note.path,
+      status: "file",
+      excerpt: tail(String(note.content ?? ""), 6000)
+    };
+  }
+  if (note.kind === "directory") {
+    return {
+      path: note.path,
+      status: "directory",
+      entries: Array.isArray(note.entries) ? note.entries.slice(0, 25) : []
+    };
+  }
+  return {
+    path: note.path,
+    status: note.kind || "unknown"
+  };
 }
 
 function summarizeMemoryPath(repoPath, relativePath) {

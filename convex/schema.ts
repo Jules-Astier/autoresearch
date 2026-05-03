@@ -85,6 +85,7 @@ export default defineSchema({
       workspacePath: v.string(),
       targetPath: v.string()
     }))),
+    artifactContract: v.optional(v.any()),
     modelIoContract: v.optional(v.string()),
     agent: v.optional(v.any()),
     memory: v.optional(v.any()),
@@ -281,13 +282,16 @@ export default defineSchema({
   researchMemoryNotes: defineTable({
     sessionId: v.id("researchSessions"),
     path: v.string(),
+    status: v.optional(v.string()),
     kind: v.string(),
     content: v.optional(v.string()),
     entries: v.optional(v.array(v.string())),
     byteLength: v.optional(v.float64()),
     contentHash: v.optional(v.string()),
     updatedAtUtc: v.string(),
-    updatedByRunId: v.optional(v.id("researchRuns"))
+    updatedByRunId: v.optional(v.id("researchRuns")),
+    invalidatedAtUtc: v.optional(v.string()),
+    invalidatedByRollbackId: v.optional(v.id("researchRollbacks"))
   })
     .index("by_session", ["sessionId"])
     .index("by_session_path", ["sessionId", "path"]),

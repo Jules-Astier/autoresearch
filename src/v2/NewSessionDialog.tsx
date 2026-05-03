@@ -28,6 +28,16 @@ export type NewSessionPayload = {
   baseRef?: string;
   metricParserCommand?: string;
   runtimeConfigPaths?: string[];
+  artifactContract?: {
+    required?: boolean;
+    artifacts?: Array<{
+      path: string;
+      kind?: string;
+      mimeType?: string;
+      sourcePath?: string;
+      required?: boolean;
+    }>;
+  };
   modelIoContract?: string;
   agent?: unknown;
   sandbox?: { environment?: string; backend?: string; provider?: string; [key: string]: unknown } | string;
@@ -242,6 +252,10 @@ function ContractPreview({ payload }: { payload: NewSessionPayload }) {
         <ContractList
           label="runtime config paths"
           values={payload.runtimeConfigPaths ?? []}
+        />
+        <ContractList
+          label="artifacts"
+          values={(payload.artifactContract?.artifacts ?? []).map((artifact) => artifact.path)}
         />
         <ContractItem
           label="model io contract"

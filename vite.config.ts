@@ -57,6 +57,33 @@ function localFolderPicker(): Plugin {
           writeJson(res, 400, { error: message });
         });
     });
+
+    server.middlewares.use("/api/local/sync-metric-contract", (req, res) => {
+      if (req.method === "OPTIONS") {
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
+
+      if (req.method !== "POST") {
+        writeJson(res, 405, { error: "Use POST to sync a session metric contract." });
+        return;
+      }
+
+      void readJsonBody(req)
+        .then((body) => {
+          const sessionDir = String(body?.path ?? "").trim();
+          if (!sessionDir) {
+            throw new Error("Missing session directory path.");
+          }
+          return syncMetricContract(sessionDir);
+        })
+        .then((payload) => writeJson(res, 200, payload))
+        .catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          writeJson(res, 400, { error: message });
+        });
+    });
   }
 
   return {
@@ -165,6 +192,45 @@ function readSessionDirectory(sessionDir: string): Promise<unknown> {
             : error,
         );
       }
+    });
+  });
+}
+
+function syncMetricContract(sessionDir: string): Promise<Record<string, unknown>> {
+  const root = process.cwd();
+  const resolvedSessionDir = path.resolve(sessionDir);
+  const binPath = path.join(root, "bin", "autoresearch.mjs");
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      binPath,
+      "session",
+      "sync-metric-contract",
+      resolvedSessionDir,
+    ], {
+      cwd: root,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || `autoresearch sync exited with ${code}`));
+        return;
+      }
+      resolve({
+        path: resolvedSessionDir,
+        output: stdout.trim(),
+      });
     });
   });
 }

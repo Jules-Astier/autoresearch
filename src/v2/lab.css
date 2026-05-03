@@ -355,12 +355,12 @@ body.lab-frontier-scroll-locked {
   touch-action: none;
 }
 .lab-ledger .frontier-chart-controls {
-  position: absolute;
-  top: 10px;
-  right: 10px;
+  grid-column: 1 / -1;
+  justify-self: end;
   display: flex;
   align-items: center;
   gap: 4px;
+  margin: 10px 14px 0;
   background: var(--paper-1);
   border: 1px solid var(--rule-soft);
   border-radius: var(--r-md);
@@ -414,7 +414,7 @@ body.lab-frontier-scroll-locked {
 }
 .lab-ledger .frontier-metric-option {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px 10px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
   padding: 7px 8px;
@@ -431,6 +431,11 @@ body.lab-frontier-scroll-locked {
   height: 13px;
   accent-color: var(--amber);
 }
+.lab-ledger .frontier-metric-option-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+}
 .lab-ledger .frontier-metric-option-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -445,13 +450,13 @@ body.lab-frontier-scroll-locked {
   white-space: nowrap;
 }
 .lab-ledger .frontier-chart-yaxis {
-  height: 236px;
+  height: 316px;
   border-right: 1px solid var(--rule-soft);
   position: relative;
 }
 .lab-ledger .frontier-chart-yaxis svg { display: block; }
 .lab-ledger .frontier-chart-scroll {
-  height: 236px;
+  height: 316px;
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior: contain;
@@ -461,18 +466,22 @@ body.lab-frontier-scroll-locked {
 }
 .lab-ledger .frontier-chart-scroll svg { display: block; }
 .lab-ledger .frontier-chart-tooltip {
-  position: absolute;
+  position: fixed;
   pointer-events: none;
+  max-width: min(360px, calc(100vw - 24px));
   background: var(--ink-1);
   color: var(--paper-2);
   font-family: var(--face-mono);
   font-size: 12px;
   padding: 6px 10px;
   border-radius: var(--r-sm);
-  white-space: nowrap;
-  z-index: 2;
+  white-space: normal;
+  z-index: 20;
   transform: translate(-50%, -120%);
   box-shadow: var(--shadow-paper);
+}
+.lab-ledger .frontier-chart-tooltip[data-placement="below"] {
+  transform: translate(-50%, 0);
 }
 .lab-ledger .frontier-chart-tooltip .delta { margin-left: 6px; }
 .lab-ledger .frontier-chart-tooltip .delta.up   { color: #b0d18a; }
@@ -486,6 +495,11 @@ body.lab-frontier-scroll-locked {
   display: flex;
   justify-content: space-between;
   gap: 14px;
+}
+.lab-ledger .frontier-chart-tooltip-metrics span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .lab-ledger .frontier-chart-tooltip-metrics strong {
   font-weight: 500;
@@ -512,13 +526,11 @@ body.lab-frontier-scroll-locked {
 }
 .lab-ledger .frontier-chart-legend-line {
   width: 18px;
-  height: 2px;
-  background: repeating-linear-gradient(
-    90deg,
-    currentColor 0 5px,
-    transparent 5px 8px
-  );
+  height: 3px;
   color: var(--sepia);
+}
+.lab-ledger .frontier-chart-legend-note {
+  color: var(--ink-4);
 }
 .lab-ledger .frontier-chart-meta {
   display: flex;

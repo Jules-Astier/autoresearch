@@ -26,7 +26,7 @@ try {
     { stdio: "inherit" },
   );
 
-  const { promotionMilestoneIdsForSession } = await import(
+  const { promotionMilestoneIdsForDisplay, promotionMilestoneIdsForSession } = await import(
     pathToFileURL(join(outDir, "promotionHistory.js"))
   );
   const contract = {
@@ -78,6 +78,70 @@ try {
   ]);
 
   assert.deepEqual([...orderedIds], ["l1", "l2", "l4"]);
+
+  const switchedContract = {
+    rankingMode: "lexicographic",
+    primaryMetric: "new_metric",
+    metrics: [
+      { name: "new_metric", direction: "maximize", role: "objective" },
+      {
+        name: "old_metric",
+        direction: "minimize",
+        role: "constraint",
+        max: 0.4,
+        guardrail: {
+          source: "best_experiment",
+          sourceMetric: "old_metric",
+          allowedRegression: 0,
+        },
+      },
+    ],
+  };
+  const switchedIds = promotionMilestoneIdsForDisplay(
+    switchedContract,
+    [
+      { id: "s1", ordinal: 1, status: "completed", metrics: { old_metric: 0.8, new_metric: 0.1 } },
+      { id: "s2", ordinal: 2, status: "completed", metrics: { old_metric: 0.5, new_metric: 0.2 } },
+      { id: "s3", ordinal: 3, status: "completed", metrics: { old_metric: 0.6, new_metric: 0.3 } },
+      { id: "s4", ordinal: 4, status: "completed", metrics: { old_metric: 0.4, new_metric: 0.4 } },
+      { id: "s5", ordinal: 5, status: "completed", metrics: { old_metric: 0.4, new_metric: 0.6 } },
+    ],
+    [
+      {
+        type: "metric_policy.switched",
+        createdAtUtc: "2026-01-01T00:00:00.000Z",
+        payload: {
+          fromObjective: "old_metric",
+          toObjective: "new_metric",
+          sourceExperimentId: "s4",
+        },
+      },
+    ],
+  );
+
+  assert.deepEqual([...switchedIds], ["s1", "s2", "s4"]);
+
+  const persistedSwitchedIds = promotionMilestoneIdsForDisplay(
+    switchedContract,
+    [
+      { id: "p1", ordinal: 1, status: "completed", metrics: { old_metric: 0.8, new_metric: 0.1 }, promoted: true },
+      { id: "p2", ordinal: 2, status: "completed", metrics: { old_metric: 0.5, new_metric: 0.2 }, promoted: true },
+      { id: "p3", ordinal: 3, status: "completed", metrics: { old_metric: 0.4, new_metric: 0.3 }, promoted: false },
+    ],
+    [
+      {
+        type: "metric_policy.switched",
+        createdAtUtc: "2026-01-01T00:00:00.000Z",
+        payload: {
+          fromObjective: "old_metric",
+          toObjective: "new_metric",
+          sourceExperimentId: "p3",
+        },
+      },
+    ],
+  );
+
+  assert.deepEqual([...persistedSwitchedIds], ["p1", "p2"]);
 } finally {
   rmSync(outDir, { recursive: true, force: true });
 }

@@ -87,6 +87,17 @@ environment instead.
       "targetPath": "/absolute/path/to/shared/large_readonly_dataset.pt"
     }
   ],
+  "artifactContract": {
+    "required": true,
+    "artifacts": [
+      {
+        "path": "artifacts/validation_actual_vs_predicted.png",
+        "kind": "validation_actual_vs_predicted_png",
+        "mimeType": "image/png",
+        "sourcePath": "plot.py"
+      }
+    ]
+  },
   "modelIoContract": "Keep the public CLI and metric JSON output stable. For architecture_change experiments, update figures/model_architecture.tex using TikZ.",
   "agent": {
     "provider": "codex",
@@ -166,6 +177,16 @@ already contains that path, the runner replaces it with the configured symlink
 before applying patches or starting the worker. `targetPath` is resolved at
 registration time and must exist on the runner host. Pair linked paths with
 `immutablePaths` so workers know they must read them but not modify them.
+
+`artifactContract` declares files that the benchmark creates for every
+experiment, such as validation actual-vs-predicted plots, residual histograms,
+or confusion matrices. The runner does not generate these files itself. After a
+benchmark prints valid metrics, the runner reads each configured artifact path
+from the workspace and stores the bytes in Convex `researchArtifacts` for that
+experiment. Set `artifactContract.required: false` or an individual artifact's
+`required: false` to skip missing files instead of failing the run. The
+top-level shorthand `"artifacts": [...]` is accepted and normalized to
+`artifactContract.artifacts`.
 
 ## Durable Research Memory
 

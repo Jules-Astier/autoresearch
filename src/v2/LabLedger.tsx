@@ -69,6 +69,7 @@ export function LabLedger() {
   const experiments: ExperimentLite[] = (detail?.experiments ?? []) as ExperimentLite[];
   const rollbacks: RollbackLite[] = (detail?.rollbacks ?? []) as RollbackLite[];
   const runs = detail?.runs ?? [];
+  const events = detail?.events ?? [];
   const patches = detail?.patches ?? [];
   const artifacts = detail?.artifacts ?? [];
   const messages = detail?.messages ?? [];
@@ -155,6 +156,7 @@ export function LabLedger() {
                 <Frontier
                   session={session}
                   experiments={experiments}
+                  events={events}
                   onSelectExperiment={setSelectedExperimentId}
                 />
                 <HypothesisNow activeRun={activeRun} experiment={activeExperiment} />
@@ -386,7 +388,10 @@ export function LabLedger() {
           onClose={() => setIsRemoveSessionOpen(false)}
           onRemove={async () => {
             const nextSession = (sessions ?? []).find((candidate) => candidate._id !== session._id);
-            await removeSession({ sessionId: session._id });
+            for (;;) {
+              const result = await removeSession({ sessionId: session._id });
+              if (result.deleted.done) break;
+            }
             setSelectedSessionId(nextSession?._id);
             setSelectedExperimentId(undefined);
             setDiffPatchId(undefined);
@@ -399,7 +404,10 @@ export function LabLedger() {
           session={session}
           onClose={() => setIsRestartSessionOpen(false)}
           onRestart={async () => {
-            await restartSession({ sessionId: session._id });
+            for (;;) {
+              const result = await restartSession({ sessionId: session._id });
+              if (result.deleted.done) break;
+            }
             setSelectedExperimentId(undefined);
             setDiffPatchId(undefined);
           }}

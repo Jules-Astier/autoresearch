@@ -10,10 +10,18 @@ import {
 } from "./format";
 import type { ExperimentLite } from "./lineageTree";
 import { experimentSourceCount } from "./sources";
+import {
+  buildMetricSeries,
+  metricFocusedAtOrdinal,
+  metricFocusedForSegment,
+  type FocusEra,
+  type MetricSeriesOption,
+} from "./frontierSeries";
 
 type Props = {
   session: any;
   experiments: ExperimentLite[];
+  events?: Array<any>;
   onSelectExperiment?: (experimentId: string) => void;
 };
 
@@ -28,27 +36,32 @@ type Point = {
   sourceCount: number;
 };
 
-type MetricOption = {
+type MetricOption = MetricSeriesOption & {
   name: string;
   direction: "maximize" | "minimize";
   measured: number;
+  color: string;
 };
 
 const DEFAULT_PX = 44;
 const MIN_PX = 10;
 const MAX_PX = 160;
-const CHART_PLOT_H = 220;
+const CHART_PLOT_H = 300;
 const CHART_SCROLL_GUTTER = 16;
 const CHART_H = CHART_PLOT_H + CHART_SCROLL_GUTTER;
-const CHART_PAD_TOP = 18;
-const CHART_PAD_BOTTOM = 28;
+const CHART_PAD_TOP = 24;
+const CHART_PAD_BOTTOM = 34;
 
-export function Frontier({ session, experiments, onSelectExperiment }: Props) {
+export function Frontier({ session, experiments, events = [], onSelectExperiment }: Props) {
   const topObjective = topObjectiveMetric(session?.metricContract);
   const direction = metricDirection(session?.metricContract, topObjective);
+  const graphExperiments = useMemo(
+    () => experiments.filter((experiment) => experiment.status !== "rolled_back"),
+    [experiments],
+  );
 
   const trajectory: Point[] = useMemo(() => {
-    const completed = experiments
+    const completed = graphExperiments
       .filter((e) => typeof e.metrics?.[topObjective] === "number")
       .sort((a, b) => a.ordinal - b.ordinal);
 
@@ -70,7 +83,7 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
         sourceCount: experimentSourceCount(e.sources),
       };
     });
-  }, [experiments, topObjective, direction]);
+  }, [graphExperiments, topObjective, direction]);
 
   const highWaterPoints = trajectory.filter((p) => p.isHighWater);
   const bestPoint = highWaterPoints[highWaterPoints.length - 1];
@@ -85,7 +98,7 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
 
   const empty = trajectory.length === 0 || !topObjective;
   const sourcedMeasured = trajectory.filter((point) => point.sourceCount > 0).length;
-  const extraMetricOptions: MetricOption[] = useMemo(() => {
+  const allMetricOptions: MetricOption[] = useMemo(() => {
     const names = new Set<string>();
     const contractMetrics = Array.isArray(session?.metricContract?.metrics)
       ? session.metricContract.metrics
@@ -93,33 +106,43 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
     for (const metric of contractMetrics) {
       if (metric?.name) names.add(String(metric.name));
     }
-    for (const experiment of experiments) {
+    for (const experiment of graphExperiments) {
       for (const [name, value] of Object.entries(experiment.metrics ?? {})) {
         if (typeof value === "number" && Number.isFinite(value)) names.add(name);
       }
     }
-    names.delete(topObjective);
     return [...names]
-      .map((name) => ({
+      .sort((a, b) => {
+        if (a === topObjective) return -1;
+        if (b === topObjective) return 1;
+        return a.localeCompare(b);
+      })
+      .map((name, index) => ({
         name,
         direction: metricDirection(session?.metricContract, name),
-        measured: experiments.filter(
+        measured: graphExperiments.filter(
           (experiment) =>
             typeof experiment.metrics?.[name] === "number" &&
             Number.isFinite(experiment.metrics[name]),
         ).length,
+        color: metricColor(index),
       }))
       .filter((metric) => metric.measured > 0)
-      .sort((a, b) => a.name.localeCompare(b.name));
-  }, [experiments, session?.metricContract, topObjective]);
-  const [selectedExtraMetrics, setSelectedExtraMetrics] = useState<string[]>([]);
+  }, [graphExperiments, session?.metricContract, topObjective]);
+  const [selectedMetrics, setSelectedMetrics] = useState<string[]>([]);
 
   useEffect(() => {
-    const valid = new Set(extraMetricOptions.map((metric) => metric.name));
-    setSelectedExtraMetrics((selected) =>
-      selected.filter((metricName) => valid.has(metricName)),
-    );
-  }, [extraMetricOptions]);
+    const valid = new Set(allMetricOptions.map((metric) => metric.name));
+    setSelectedMetrics((selected) => {
+      const kept = selected.filter((metricName) => valid.has(metricName));
+      return kept.length > 0 ? kept : allMetricOptions.map((metric) => metric.name);
+    });
+  }, [allMetricOptions]);
+
+  const focusEras = useMemo(
+    () => focusErasForSession({ events, experiments: graphExperiments, fallbackMetric: topObjective }),
+    [events, graphExperiments, topObjective],
+  );
 
   return (
     <section className="frontier" aria-label="Frontier - top objective trajectory">
@@ -167,10 +190,11 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
         <Chart
           points={trajectory}
           direction={direction}
-          extraMetricOptions={extraMetricOptions}
-          selectedExtraMetrics={selectedExtraMetrics}
-          onToggleExtraMetric={(metricName) => {
-            setSelectedExtraMetrics((selected) =>
+          metricOptions={allMetricOptions}
+          selectedMetrics={selectedMetrics}
+          focusEras={focusEras}
+          onToggleMetric={(metricName) => {
+            setSelectedMetrics((selected) =>
               selected.includes(metricName)
                 ? selected.filter((name) => name !== metricName)
                 : [...selected, metricName],
@@ -186,53 +210,87 @@ export function Frontier({ session, experiments, onSelectExperiment }: Props) {
 function Chart({
   points,
   direction,
-  extraMetricOptions,
-  selectedExtraMetrics,
-  onToggleExtraMetric,
+  metricOptions,
+  selectedMetrics,
+  focusEras,
+  onToggleMetric,
   onSelect,
 }: {
   points: Point[];
   direction: "maximize" | "minimize";
-  extraMetricOptions: MetricOption[];
-  selectedExtraMetrics: string[];
-  onToggleExtraMetric: (metricName: string) => void;
+  metricOptions: MetricOption[];
+  selectedMetrics: string[];
+  focusEras: FocusEra[];
+  onToggleMetric: (metricName: string) => void;
   onSelect?: (experimentId: string) => void;
 }) {
   const chartRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [hover, setHover] = useState<{ point: Point; left: number; top: number } | null>(null);
+  const [hover, setHover] = useState<{
+    point: Point;
+    left: number;
+    top: number;
+    placement: "above" | "below";
+  } | null>(null);
   const [pxPerPoint, setPxPerPoint] = useState<number>(DEFAULT_PX);
   const [logScale, setLogScale] = useState<boolean>(false);
+  const [unitScale, setUnitScale] = useState<boolean>(true);
   const [metricMenuOpen, setMetricMenuOpen] = useState<boolean>(false);
   const selectedMetricSet = useMemo(
-    () => new Set(selectedExtraMetrics),
-    [selectedExtraMetrics],
+    () => new Set(selectedMetrics),
+    [selectedMetrics],
   );
-  const selectedMetricOptions = extraMetricOptions.filter((metric) =>
+  const selectedMetricOptions = metricOptions.filter((metric) =>
     selectedMetricSet.has(metric.name),
   );
 
   // log requires all positive values; if any are <= 0 we silently fall back
-  const overlayValues = selectedExtraMetrics.flatMap((metricName) =>
+  const overlayValues = selectedMetrics.flatMap((metricName) =>
     points
       .map((point) => point.metrics[metricName])
       .filter((value): value is number => typeof value === "number" && Number.isFinite(value)),
   );
-  const canLog = points.every((p) => p.value > 0 && p.runningBest > 0) && overlayValues.every((value) => value > 0);
+  const canLog = overlayValues.length > 0 && overlayValues.every((value) => value > 0);
   const useLog = logScale && canLog;
   const tx = (v: number) => (useLog ? Math.log10(v) : v);
+  const metricDomains = useMemo(() => {
+    const domains = new Map<string, { min: number; max: number; span: number }>();
+    for (const metric of selectedMetricOptions) {
+      const values = points
+        .map((point) => point.metrics[metric.name])
+        .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+        .map(tx);
+      if (values.length === 0) continue;
+      const metricMin = Math.min(...values);
+      const metricMax = Math.max(...values);
+      domains.set(metric.name, {
+        min: metricMin,
+        max: metricMax,
+        span: metricMax - metricMin || Math.abs(metricMax) || 1,
+      });
+    }
+    return domains;
+  }, [points, selectedMetricOptions, useLog]);
 
-  // bounds — include both raw values and the running best
+  // bounds for shared-unit mode.
   const allValues = points
-    .flatMap((p) => [p.value, p.runningBest, ...selectedExtraMetrics.map((name) => p.metrics[name])])
+    .flatMap((p) => selectedMetrics.map((name) => p.metrics[name]))
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
     .map(tx);
-  const min = Math.min(...allValues);
-  const max = Math.max(...allValues);
+  const min = allValues.length > 0 ? Math.min(...allValues) : 0;
+  const max = allValues.length > 0 ? Math.max(...allValues) : 1;
   const span = max - min || Math.abs(max) || 1;
 
   const innerH = CHART_PLOT_H - CHART_PAD_TOP - CHART_PAD_BOTTOM;
-  const yOf = (v: number) => CHART_PAD_TOP + innerH - ((tx(v) - min) / span) * innerH;
+  const yOf = (metricName: string, v: number) => {
+    if (!unitScale) {
+      const domain = metricDomains.get(metricName);
+      if (domain) {
+        return CHART_PAD_TOP + innerH - ((tx(v) - domain.min) / domain.span) * innerH;
+      }
+    }
+    return CHART_PAD_TOP + innerH - ((tx(v) - min) / span) * innerH;
+  };
 
   // chart width — at least viewport width, but wider if there are many points
   const minVisible = 20;
@@ -242,6 +300,7 @@ function Chart({
 
   // axis ticks — 5 evenly spaced y values
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => {
+    if (!unitScale) return (1 - t) * 100;
     const v = max - t * (max - min);
     // when log scale, invert back for display label
     return useLog ? Math.pow(10, v) : v;
@@ -354,28 +413,9 @@ function Chart({
     };
   }, []);
 
-  const path = points.map((p, i) => `${i === 0 ? "M" : "L"} ${xOf(i)} ${yOf(p.value)}`).join(" ");
-  const bestPath = points.map((p, i) => `${i === 0 ? "M" : "L"} ${xOf(i)} ${yOf(p.runningBest)}`).join(" ");
-  const overlaySeries = selectedMetricOptions
-    .map((metric, metricIndex) => {
-      const segments: string[] = [];
-      let drawing = false;
-      points.forEach((point, pointIndex) => {
-        const value = point.metrics[metric.name];
-        if (typeof value !== "number" || !Number.isFinite(value)) {
-          drawing = false;
-          return;
-        }
-        segments.push(`${drawing ? "L" : "M"} ${xOf(pointIndex)} ${yOf(value)}`);
-        drawing = true;
-      });
-      return {
-        ...metric,
-        color: extraMetricColor(metricIndex),
-        path: segments.join(" "),
-      };
-    })
-    .filter((series) => series.path.length > 0);
+  const metricSeries = selectedMetricOptions.map((metric) =>
+    buildMetricSeries(metric, points, direction, focusEras, xOf, yOf),
+  );
   const totalWidth = baseWidth + 24;
 
   // x-axis ordinal labels — sparse, density-aware
@@ -391,11 +431,16 @@ function Chart({
       return;
     }
     const p = points[i];
-    const scrollRect = scrollRef.current!.getBoundingClientRect();
+    const tooltipHalfWidth = Math.min(180, Math.max(80, window.innerWidth / 2 - 12));
+    const minLeft = tooltipHalfWidth + 12;
+    const maxLeft = Math.max(minLeft, window.innerWidth - tooltipHalfWidth - 12);
+    const left = Math.min(maxLeft, Math.max(minLeft, e.clientX));
+    const placement = e.clientY < 150 ? "below" : "above";
     setHover({
       point: p,
-      left: e.clientX - scrollRect.left,
-      top: yOf(p.value),
+      left,
+      top: placement === "below" ? e.clientY + 18 : e.clientY - 14,
+      placement,
     });
   }
 
@@ -411,6 +456,78 @@ function Chart({
 
   return (
     <div className="frontier-chart" ref={chartRef} aria-label="objective and metric chart">
+      <div className="frontier-chart-controls">
+        <div className="frontier-metric-picker">
+          <button
+            type="button"
+            className={`lineage-ctrl metric-picker-toggle${metricMenuOpen ? " active" : ""}`}
+            onClick={() => setMetricMenuOpen((open) => !open)}
+            title="Select metrics"
+            aria-expanded={metricMenuOpen}
+            aria-controls="frontier-extra-metrics"
+            disabled={metricOptions.length === 0}
+          >
+            <ListChecks size={14} />
+            <span>{selectedMetrics.length || "metrics"}</span>
+          </button>
+          {metricMenuOpen && metricOptions.length > 0 ? (
+            <div
+              id="frontier-extra-metrics"
+              className="frontier-metric-menu"
+              role="menu"
+              aria-label="Metrics"
+            >
+              {metricOptions.map((metric) => {
+                const checked = selectedMetricSet.has(metric.name);
+                return (
+                  <label key={metric.name} className="frontier-metric-option">
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => onToggleMetric(metric.name)}
+                    />
+                    <span
+                      className="frontier-metric-option-swatch"
+                      style={{ background: metric.color }}
+                    />
+                    <span className="frontier-metric-option-name">{metric.name}</span>
+                    <span className="frontier-metric-option-meta">
+                      {metric.direction} · {metric.measured}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+        <button type="button" className="lineage-ctrl" onClick={zoomIn} title="Zoom in (fewer points across)">
+          <Plus size={14} />
+        </button>
+        <button type="button" className="lineage-ctrl" onClick={zoomOut} title="Zoom out (more points across)">
+          <Minus size={14} />
+        </button>
+        <button type="button" className="lineage-ctrl" onClick={zoomReset} title="Reset density">
+          <ScanSearch size={14} />
+        </button>
+        <button
+          type="button"
+          className={`lineage-ctrl scale-toggle${useLog ? " active" : ""}`}
+          onClick={() => setLogScale((v) => !v)}
+          title={canLog ? (useLog ? "Switch to linear" : "Switch to log scale") : "Log unavailable (non-positive values)"}
+          disabled={!canLog}
+        >
+          {useLog ? "log" : "lin"}
+        </button>
+        <button
+          type="button"
+          className={`lineage-ctrl scale-toggle${!unitScale ? " active" : ""}`}
+          onClick={() => setUnitScale((v) => !v)}
+          title={unitScale ? "Normalize each metric to its own range" : "Use shared raw metric units"}
+        >
+          {unitScale ? "unit" : "norm"}
+        </button>
+      </div>
+
       <div className="frontier-chart-yaxis">
         <svg width={56} height={CHART_H}>
           {yTicks.map((tickValue, i) => (
@@ -423,7 +540,7 @@ function Chart({
                 fontSize={11}
                 fill="var(--ink-3)"
               >
-                {formatMetricValue(tickValue)}
+                {unitScale ? formatMetricValue(tickValue) : ""}
               </text>
             </g>
           ))}
@@ -457,60 +574,68 @@ function Chart({
             );
           })}
 
-          {/* raw value path — faint */}
-          <path d={path} fill="none" stroke="rgba(56, 38, 12, 0.22)" strokeWidth={1.25} />
+          {metricSeries.flatMap((series) =>
+            series.rawSegments.map((segment, index) => (
+              <path
+                key={`${series.name}-raw-${index}`}
+                d={segment.path}
+                fill="none"
+                stroke={series.color}
+                strokeWidth={1.15}
+                strokeOpacity={0.32}
+                strokeLinejoin="round"
+                strokeLinecap="round"
+              />
+            )),
+          )}
 
-          {/* optional metric overlays */}
-          {overlaySeries.map((series) => (
-            <path
-              key={series.name}
-              d={series.path}
-              fill="none"
-              stroke={series.color}
-              strokeWidth={1.6}
-              strokeDasharray="5 5"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
-          ))}
-
-          {/* high-water line */}
-          <path
-            d={bestPath}
-            fill="none"
-            stroke="var(--amber)"
-            strokeWidth={2}
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
+          {metricSeries.flatMap((series) =>
+            series.bestSegments.map((segment, index) => {
+              const focused = metricFocusedForSegment(
+                series.name,
+                segment.startOrdinal,
+                segment.endOrdinal,
+                focusEras,
+              );
+              return (
+                <path
+                  key={`${series.name}-best-${index}`}
+                  d={segment.path}
+                  fill="none"
+                  stroke={series.color}
+                  strokeWidth={focused ? 3 : 2}
+                  strokeOpacity={focused ? 0.95 : 0.28}
+                  strokeDasharray={focused ? undefined : "8 7"}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              );
+            }),
+          )}
 
           {/* dots */}
           {points.map((p, i) => {
             const isHovered = hover?.point.experimentId === p.experimentId;
             return (
               <g key={p.experimentId}>
-                {p.isHighWater ? (
-                  <circle cx={xOf(i)} cy={yOf(p.runningBest)} r={3.5} fill="var(--amber)" />
-                ) : null}
-                {p.sourceCount > 0 ? (
-                  <circle
-                    cx={xOf(i)}
-                    cy={yOf(p.value)}
-                    r={6}
-                    fill="none"
-                    stroke="var(--moss)"
-                    strokeWidth={1}
-                    opacity={0.85}
-                  />
-                ) : null}
-                <circle
-                  cx={xOf(i)}
-                  cy={yOf(p.value)}
-                  r={isHovered ? 4.5 : p.promoted ? 3.5 : 2.5}
-                  fill={p.promoted ? "var(--moss)" : p.isHighWater ? "var(--amber)" : "var(--ink-4)"}
-                  stroke={isHovered ? "var(--ink-1)" : "transparent"}
-                  strokeWidth={isHovered ? 1.5 : 0}
-                />
+                {metricSeries.map((series) => {
+                  const value = p.metrics[series.name];
+                  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+                  const promotedForMetric =
+                    p.promoted && metricFocusedAtOrdinal(series.name, p.ordinal, focusEras);
+                  return (
+                    <circle
+                      key={series.name}
+                      cx={xOf(i)}
+                      cy={yOf(series.name, value)}
+                      r={isHovered ? 4.3 : promotedForMetric ? 3.8 : 2.4}
+                      fill={promotedForMetric ? series.color : "var(--paper-2)"}
+                      stroke={series.color}
+                      strokeWidth={promotedForMetric ? 2 : 1.25}
+                      opacity={p.sourceCount > 0 ? 0.95 : 0.78}
+                    />
+                  );
+                })}
               </g>
             );
           })}
@@ -536,6 +661,7 @@ function Chart({
         {hover ? (
           <div
             className="frontier-chart-tooltip"
+            data-placement={hover.placement}
             style={{ left: hover.left, top: hover.top }}
           >
             #{hover.point.ordinal} · {formatMetricValue(hover.point.value)}
@@ -548,11 +674,11 @@ function Chart({
             ) : null}
             {selectedMetricOptions.length > 0 ? (
               <div className="frontier-chart-tooltip-metrics">
-                {selectedMetricOptions.map((metric, index) => {
+                {selectedMetricOptions.map((metric) => {
                   const value = hover.point.metrics[metric.name];
                   return typeof value === "number" && Number.isFinite(value) ? (
                     <div key={metric.name}>
-                      <span style={{ color: extraMetricColor(index) }}>{metric.name}</span>
+                      <span style={{ color: metric.color }}>{metric.name}</span>
                       <strong>{formatMetricValue(value)}</strong>
                     </div>
                   ) : null;
@@ -563,9 +689,9 @@ function Chart({
         ) : null}
       </div>
 
-      {overlaySeries.length > 0 ? (
+      {metricSeries.length > 0 ? (
         <div className="frontier-chart-legend" aria-label="selected metric overlays">
-          {overlaySeries.map((series) => (
+          {metricSeries.map((series) => (
             <span key={series.name} className="frontier-chart-legend-item">
               <span
                 className="frontier-chart-legend-line"
@@ -574,79 +700,58 @@ function Chart({
               {series.name}
             </span>
           ))}
+          <span className="frontier-chart-legend-item frontier-chart-legend-note">
+            darker benchmark segments mark active focus windows
+          </span>
         </div>
       ) : null}
-
-      {/* floating chart controls */}
-      <div className="frontier-chart-controls">
-        <div className="frontier-metric-picker">
-          <button
-            type="button"
-            className={`lineage-ctrl metric-picker-toggle${metricMenuOpen ? " active" : ""}`}
-            onClick={() => setMetricMenuOpen((open) => !open)}
-            title="Select extra metrics"
-            aria-expanded={metricMenuOpen}
-            aria-controls="frontier-extra-metrics"
-            disabled={extraMetricOptions.length === 0}
-          >
-            <ListChecks size={14} />
-            <span>{selectedExtraMetrics.length || "metrics"}</span>
-          </button>
-          {metricMenuOpen && extraMetricOptions.length > 0 ? (
-            <div
-              id="frontier-extra-metrics"
-              className="frontier-metric-menu"
-              role="menu"
-              aria-label="Extra metrics"
-            >
-              {extraMetricOptions.map((metric) => {
-                const checked = selectedMetricSet.has(metric.name);
-                return (
-                  <label key={metric.name} className="frontier-metric-option">
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => onToggleExtraMetric(metric.name)}
-                    />
-                    <span className="frontier-metric-option-name">{metric.name}</span>
-                    <span className="frontier-metric-option-meta">
-                      {metric.direction} · {metric.measured}
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-          ) : null}
-        </div>
-        <button type="button" className="lineage-ctrl" onClick={zoomIn} title="Zoom in (fewer points across)">
-          <Plus size={14} />
-        </button>
-        <button type="button" className="lineage-ctrl" onClick={zoomOut} title="Zoom out (more points across)">
-          <Minus size={14} />
-        </button>
-        <button type="button" className="lineage-ctrl" onClick={zoomReset} title="Reset density">
-          <ScanSearch size={14} />
-        </button>
-        <button
-          type="button"
-          className={`lineage-ctrl scale-toggle${useLog ? " active" : ""}`}
-          onClick={() => setLogScale((v) => !v)}
-          title={canLog ? (useLog ? "Switch to linear" : "Switch to log scale") : "Log unavailable (non-positive values)"}
-          disabled={!canLog}
-        >
-          {useLog ? "log" : "lin"}
-        </button>
-      </div>
     </div>
   );
 }
 
-function extraMetricColor(index: number): string {
+function metricColor(index: number): string {
   return [
+    "var(--amber)",
+    "#3d6f83",
     "var(--moss)",
     "var(--oxblood)",
-    "var(--sepia)",
-    "#3d6f83",
     "#7b5ba7",
+    "var(--sepia)",
   ][index % 5];
+}
+
+function focusErasForSession({
+  events,
+  experiments,
+  fallbackMetric,
+}: {
+  events: Array<any>;
+  experiments: ExperimentLite[];
+  fallbackMetric: string;
+}): FocusEra[] {
+  const firstOrdinal = experiments.length > 0 ? Math.min(...experiments.map((item) => item.ordinal)) : 0;
+  const byId = new Map(experiments.map((experiment) => [String(experiment._id), experiment]));
+  const switches = events
+    .filter((event) => event?.type === "metric_policy.switched")
+    .sort((a, b) => String(a.createdAtUtc ?? "").localeCompare(String(b.createdAtUtc ?? "")));
+  if (switches.length === 0) {
+    return fallbackMetric ? [{ metric: fallbackMetric, startOrdinal: firstOrdinal }] : [];
+  }
+  const eras: FocusEra[] = [];
+  const firstPayload = switches[0]?.payload ?? {};
+  if (typeof firstPayload.fromObjective === "string") {
+    eras.push({ metric: firstPayload.fromObjective, startOrdinal: firstOrdinal });
+  }
+  for (const event of switches) {
+    const payload = event?.payload ?? {};
+    if (typeof payload.toObjective !== "string") continue;
+    const sourceOrdinal = payload.sourceExperimentId
+      ? byId.get(String(payload.sourceExperimentId))?.ordinal
+      : undefined;
+    eras.push({
+      metric: payload.toObjective,
+      startOrdinal: sourceOrdinal ?? firstOrdinal,
+    });
+  }
+  return eras.length > 0 ? eras : fallbackMetric ? [{ metric: fallbackMetric, startOrdinal: firstOrdinal }] : [];
 }

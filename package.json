@@ -23,6 +23,7 @@
     "orchestrator:codex": "node scripts/codex-orchestrator.mjs",
     "runner:codex": "node scripts/codex-runner.mjs",
     "test:codex-runner": "node scripts/test-codex-runner.mjs",
+    "test:frontier-series": "node scripts/test-frontier-series.mjs",
     "test:promotion-history": "node scripts/test-promotion-history.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173"

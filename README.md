@@ -107,6 +107,7 @@ The required runtime fields are:
 - `maxPlannedConcurrentExperiments` (optional, defaults to 3)
 - `preemptivePlanning` (optional, defaults to true)
 - `editablePaths`
+- `artifactContract` (optional benchmark-produced artifact files)
 - `metricContract.metrics`
 
 Metric contracts use the order of `metrics` as the objective priority when
@@ -122,6 +123,10 @@ Docker, Podman, or Vercel execution for agent and benchmark runs, and can select
 `codex`, `claude-code`, `opencode`, or `pi` for each role under `agent`.
 Metrics are parsed from the last JSON object in benchmark output or from
 `metric_name: 1.23` lines.
+
+Benchmarks can also produce experiment artifacts such as validation plots. Add
+`artifactContract.artifacts` entries with repo-relative output paths, and the
+runner stores each generated image after metrics are parsed successfully.
 
 Set `workspaceLinks` whenever the benchmark uses large read-only generated
 inputs, such as prepared datasets or feature tensors. Without it, each run can

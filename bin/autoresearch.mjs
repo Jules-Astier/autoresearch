@@ -197,6 +197,7 @@ function initReadmeContent(projectName) {
     "- `repoPath` points from the session directory back to this repository. For `sessions/<slug>`, that is usually `../../..`.",
     "- `editablePaths`, `immutablePaths`, and `runtimeConfigPaths` are relative to the repository root, not the session directory.",
     "- Configure `workspaceLinks` for large read-only generated inputs, such as prepared datasets, so long sessions do not duplicate them per run.",
+    "- Add `artifactContract.artifacts` when the benchmark writes validation plots or other experiment images.",
     "- `metricContract.metrics` is ordered by priority when `rankingMode` is `lexicographic`.",
     "- Secrets stay out of session files. Put only environment variable names in `agent.envVars`, `sandbox.envVars`, or `.env.example`.",
     "- The benchmark must print either a final JSON object or `metric_name: 1.23` lines."
@@ -556,6 +557,14 @@ async function runSessionCommand(argv) {
     await registerSession(subargv);
     return;
   }
+  if (
+    subcommand === "sync-metric-contract" ||
+    subcommand === "sync-contract" ||
+    subcommand === "sync"
+  ) {
+    syncSessionMetricContract(subargv);
+    return;
+  }
   if (subcommand === "search" || subcommand === "results") {
     await searchSessionResults(subargv);
     return;
@@ -594,6 +603,76 @@ async function registerSession(argv) {
   const sessionId = await client.mutation(api.orchestration.registerResearchSession, payload);
   console.log(`Registered ${payload.slug} at ${convexUrl}`);
   console.log(`Session id: ${sessionId}`);
+}
+
+function syncSessionMetricContract(argv) {
+  const args = parseArgs(argv);
+  if (args.help || args.h) {
+    printSessionSyncMetricContractHelp();
+    return;
+  }
+  const sessionDirArg = args._[0];
+  if (!sessionDirArg || args._.length > 1) {
+    throw new Error(
+      "Usage: autoresearch session sync-metric-contract <session-dir> [--dry-run]"
+    );
+  }
+  const sessionDir = path.resolve(process.cwd(), sessionDirArg);
+  const contractPath = path.join(sessionDir, "session.json");
+  if (!fs.existsSync(contractPath)) {
+    throw new Error(`Missing session.json: ${contractPath}`);
+  }
+
+  const rawContract = JSON.parse(fs.readFileSync(contractPath, "utf8"));
+  const metricContract = normalizeMetricContract(rawContract.metricContract);
+  const writes = [];
+
+  const goalPath = path.join(sessionDir, "goal.md");
+  if (fs.existsSync(goalPath)) {
+    writes.push({
+      filePath: goalPath,
+      content: syncGoalMarkdown(fs.readFileSync(goalPath, "utf8"), metricContract),
+    });
+  }
+
+  const metricContractPath = path.join(sessionDir, "metric_contract.md");
+  writes.push({
+    filePath: metricContractPath,
+    content: renderMetricContractMarkdown(metricContract),
+  });
+
+  const agentsPath = path.join(sessionDir, "AGENTS.md");
+  if (fs.existsSync(agentsPath)) {
+    writes.push({
+      filePath: agentsPath,
+      content: syncAgentsMarkdown(fs.readFileSync(agentsPath, "utf8"), metricContract),
+    });
+  }
+
+  const trainPath = path.join(sessionDir, "train.py");
+  if (fs.existsSync(trainPath)) {
+    writes.push({
+      filePath: trainPath,
+      content: syncTrainMetricSelection(fs.readFileSync(trainPath, "utf8"), metricContract),
+    });
+  }
+
+  if (args.dryRun) {
+    console.log(JSON.stringify({
+      sessionDir,
+      metricContract,
+      files: writes.map((write) => path.relative(sessionDir, write.filePath)),
+    }, null, 2));
+    return;
+  }
+
+  for (const write of writes) {
+    fs.writeFileSync(write.filePath, write.content, "utf8");
+  }
+  console.log(`Synced metric contract for ${sessionDir}`);
+  for (const write of writes) {
+    console.log(`  ${path.relative(sessionDir, write.filePath)}`);
+  }
 }
 
 async function searchSessionResults(argv) {
@@ -720,6 +799,7 @@ ${JSON.stringify(contract, null, 2)}
    immutablePaths: repo-relative files or globs workers must not change.
    runtimeConfigPaths: repo-relative config files planners should inspect.
    workspaceLinks: important for large read-only generated inputs; link shared prepared datasets or cached features instead of copying them into every run workspace.
+   artifactContract.artifacts: optional benchmark-created image files to store per experiment.
    metricContract.metrics: ordered objectives; constraints may include role "constraint".
 
 4. Validate without touching Convex:
@@ -773,6 +853,7 @@ function normalizeSessionContract(contract, sessionDir) {
     immutablePaths: stringArray(contract.immutablePaths, "immutablePaths"),
     runtimeConfigPaths: stringArray(contract.runtimeConfigPaths, "runtimeConfigPaths"),
     workspaceLinks: normalizeWorkspaceLinks(contract.workspaceLinks, sessionDir),
+    artifactContract: normalizeArtifactContract(contract.artifactContract ?? contract.artifacts),
     modelIoContract: optionalString(contract.modelIoContract),
     agent: normalizeAgentConfig(contract.agent),
     memory: normalizeMemoryConfig(contract.memory),
@@ -780,6 +861,66 @@ function normalizeSessionContract(contract, sessionDir) {
     sandbox: normalizeSandboxConfig(contract.sandbox),
     earlyStopping: contract.earlyStopping
   };
+}
+
+function normalizeArtifactContract(value) {
+  if (value === undefined || value === null) return undefined;
+  const contract = Array.isArray(value) ? { artifacts: value } : value;
+  if (!isPlainObject(contract)) {
+    throw new Error("artifactContract must be an object when provided");
+  }
+  if (!Array.isArray(contract.artifacts)) {
+    throw new Error("artifactContract.artifacts must be an array");
+  }
+  const required = optionalBoolean(contract.required, "artifactContract.required");
+  return {
+    ...(required === undefined ? {} : { required }),
+    artifacts: contract.artifacts.map((item, index) => {
+      if (!isPlainObject(item)) {
+        throw new Error(`artifactContract.artifacts[${index}] must be an object`);
+      }
+      const artifactPath = normalizeRelativeConfigPath(
+        item.path,
+        `artifactContract.artifacts[${index}].path`
+      );
+      const artifact = {
+        path: artifactPath,
+        kind: optionalString(item.kind) ?? artifactKindFromPath(artifactPath),
+        mimeType: optionalString(item.mimeType) ?? mimeTypeFromPath(artifactPath),
+      };
+      const sourcePath = optionalString(item.sourcePath);
+      if (sourcePath !== undefined) {
+        artifact.sourcePath = normalizeRelativeConfigPath(
+          sourcePath,
+          `artifactContract.artifacts[${index}].sourcePath`
+        );
+      }
+      const itemRequired = optionalBoolean(
+        item.required,
+        `artifactContract.artifacts[${index}].required`
+      );
+      if (itemRequired !== undefined) artifact.required = itemRequired;
+      return artifact;
+    })
+  };
+}
+
+function artifactKindFromPath(value) {
+  const basename = path.posix.basename(value).replace(/\.[^.]+$/u, "");
+  const normalized = basename
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return normalized ? `${normalized}_artifact` : "benchmark_artifact";
+}
+
+function mimeTypeFromPath(value) {
+  const extension = path.posix.extname(value).toLowerCase();
+  if (extension === ".png") return "image/png";
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  if (extension === ".webp") return "image/webp";
+  if (extension === ".svg") return "image/svg+xml";
+  throw new Error(`artifactContract artifact ${value} must declare mimeType`);
 }
 
 function normalizeWorkspaceLinks(value, sessionDir) {
@@ -872,6 +1013,290 @@ function optionalMetricDirection(value, field) {
 
 function isObjectiveMetricSpec(spec) {
   return String(spec.role ?? "objective") !== "constraint";
+}
+
+function syncGoalMarkdown(content, metricContract) {
+  const ranking = renderRankingContractMarkdown(metricContract);
+  let next = content;
+  if (/## Metric Ranking/u.test(next)) {
+    next = next.replace(
+      /## Metric Ranking[\s\S]*?(?=\n## Out Of Scope)/u,
+      `${ranking}\n\n`
+    );
+  } else {
+    next = next.replace(
+      /The ranking contract is[\s\S]*?(?=\n## Out Of Scope)/u,
+      `${ranking}\n\n`
+    );
+  }
+  next = next.replace(
+    /For this session, optimize only two benchmark metrics:[\s\S]*?\n\nThe prepared dataset is fixed\./u,
+    `For this session, optimize the benchmark metrics under the ranking contract below.\n\nThe prepared dataset is fixed.`
+  );
+  next = next.replace(
+    /Better calibration-first ranking is useful/u,
+    "Better metric-contract ranking is useful"
+  );
+  if (next === content && !content.includes("## Metric Ranking")) {
+    next = `${content.trimEnd()}\n\n${ranking}\n`;
+  }
+  return ensureTrailingNewline(next);
+}
+
+function syncAgentsMarkdown(content, metricContract) {
+  const ranking = renderAgentsRankingMarkdown(metricContract);
+  let next = content.replace(
+    /- metric definitions, parser behavior, or .*ranking semantics/u,
+    "- metric definitions, parser behavior, or session.json metric ranking semantics"
+  );
+  next = next.replace(
+    /## Ranking[\s\S]*?(?=\n## |\nThis is research only\.|$)/u,
+    `${ranking}\n\n`
+  );
+  if (next === content && !content.includes("## Ranking")) {
+    next = `${content.trimEnd()}\n\n${ranking}\n`;
+  }
+  return ensureTrailingNewline(next);
+}
+
+function renderMetricContractMarkdown(metricContract) {
+  const objectiveSpecs = objectiveMetricSpecsForContract(metricContract);
+  const constraintSpecs = constraintMetricSpecsForContract(metricContract);
+  const primary = objectiveSpecs[0];
+  const primaryLine = primary
+    ? `Primary optimization goal: ${primary.name}.`
+    : "Primary optimization goal: none declared.";
+  const secondary = objectiveSpecs.slice(1);
+  const guardrails = constraintSpecs.length > 0
+    ? constraintSpecs.map((spec) => `- \`${spec.name}\` must satisfy ${constraintDescription(spec)}.`)
+    : ["- No guardrail metrics are declared."];
+
+  return textBlock([
+    "# Metric Contract",
+    "",
+    primaryLine,
+    secondary.length > 0
+      ? `Secondary optimization goals: ${secondary.map((spec) => `\`${spec.name}\``).join(", ")}.`
+      : "Secondary optimization goals: none.",
+    "",
+    "## Ranking",
+    "",
+    ...renderMetricOrderLines(metricContract),
+    "",
+    "## Guardrails",
+    "",
+    ...guardrails,
+    "",
+    "## Metric Definitions",
+    "",
+    "- Metric formulas are owned by the benchmark implementation.",
+    "- The benchmark must print parseable numeric values for every reported metric.",
+    "- Objective metrics are ranked in the order declared in `session.json`.",
+    "- Constraint metrics filter candidates before objective comparison.",
+    "",
+    "## Valid Run Requirements",
+    "",
+    "- `status` must be `ok`.",
+    "- The benchmark command declared in `session.json` must complete successfully.",
+    "- The run must keep fixed data, target definitions, train/validation split, metric names, and parser behavior unchanged unless the session contract explicitly changes them.",
+    "- The run must print parseable JSON or metric lines containing the reported metrics declared in `session.json`.",
+    "",
+    "## Promotion",
+    "",
+    "Promote locally only when a valid run improves the ranking declared in `session.json` while satisfying every guardrail.",
+  ]);
+}
+
+function renderRankingContractMarkdown(metricContract) {
+  return textBlock([
+    "## Metric Ranking",
+    "",
+    "The ranking contract is derived from `session.json`:",
+    "",
+    ...renderMetricOrderLines(metricContract),
+  ]).trimEnd();
+}
+
+function renderAgentsRankingMarkdown(metricContract) {
+  return textBlock([
+    "## Ranking",
+    "",
+    "Optimize according to the metric contract in `session.json`:",
+    "",
+    ...renderMetricOrderLines(metricContract),
+  ]).trimEnd();
+}
+
+function renderMetricOrderLines(metricContract) {
+  const objectives = objectiveMetricSpecsForContract(metricContract);
+  const constraints = constraintMetricSpecsForContract(metricContract);
+  const lines = [];
+  objectives.forEach((spec, index) => {
+    lines.push(`${index + 1}. ${directionVerb(spec.direction)} \`${spec.name}\``);
+  });
+  if (constraints.length > 0) {
+    lines.push("");
+    lines.push("Guardrails:");
+    for (const spec of constraints) {
+      lines.push(`- \`${spec.name}\`: ${constraintDescription(spec)}`);
+    }
+  }
+  return lines.length > 0 ? lines : ["1. No objective metrics are declared."];
+}
+
+function objectiveMetricSpecsForContract(metricContract) {
+  const metrics = Array.isArray(metricContract.metrics) ? metricContract.metrics : [];
+  return metrics.filter((spec) => isObjectiveMetricSpec(spec));
+}
+
+function constraintMetricSpecsForContract(metricContract) {
+  const metrics = Array.isArray(metricContract.metrics) ? metricContract.metrics : [];
+  return metrics.filter((spec) => !isObjectiveMetricSpec(spec));
+}
+
+function directionVerb(direction) {
+  return String(direction ?? "minimize") === "maximize" ? "maximize" : "minimize";
+}
+
+function constraintDescription(spec) {
+  const parts = [];
+  if (typeof spec.max === "number") parts.push(`<= ${spec.max}`);
+  if (typeof spec.min === "number") parts.push(`>= ${spec.min}`);
+  if (parts.length === 0) return "reported as a guardrail";
+  return parts.join(" and ");
+}
+
+function syncTrainMetricSelection(content, metricContract) {
+  const selectionFunction = renderPythonSelectionFunction(metricContract);
+  const legacySelectionPattern =
+    /def _selection_key\(metrics: EpochMetrics\) -> tuple\[float, float\]:[\s\S]*?(?=\n+def _is_selection_improvement)/u;
+  const selectionPattern =
+    /def _selection_key\(metrics: EpochMetrics\)[\s\S]*?(?=\n+def _is_selection_improvement)/u;
+  let next = content;
+  if (legacySelectionPattern.test(next)) {
+    next = next.replace(legacySelectionPattern, `${selectionFunction}\n`);
+  } else if (selectionPattern.test(next)) {
+    next = next.replace(selectionPattern, `${selectionFunction}\n`);
+  } else {
+    throw new Error("Could not find train.py _selection_key function to update");
+  }
+  next = next.replace(
+    /def _is_selection_improvement\([\s\S]*?(?=\n+def _batch)/u,
+    `${renderPythonSelectionImprovementFunction()}\n`
+  );
+  next = next.replace(/\n{3,}(def _is_selection_improvement)/u, "\n\n$1");
+  next = next.replace(/\n{3,}(def _batch)/u, "\n\n$1");
+  next = next.replace(
+    /"selection_metric": "[^"]+"/u,
+    `"selection_metric": "${selectionMetricLabel(metricContract)}"`
+  );
+  next = next.replace(
+    /best_selection_key: tuple\[float, float\] \| None = None/u,
+    "best_selection_key: tuple[float, ...] | None = None"
+  );
+  next = next.replace(
+    /calibration-first selection semantics/u,
+    "session.json metric ranking semantics"
+  );
+  next = next.replace(
+    /calibration-first epoch selection/u,
+    "session.json metric epoch selection"
+  );
+  next = next.replace(
+    /metric definitions, or calibration-first selection semantics/u,
+    "metric definitions, or session.json metric selection semantics"
+  );
+  return ensureTrailingNewline(next);
+}
+
+function renderPythonSelectionFunction(metricContract) {
+  const objectives = objectiveMetricSpecsForContract(metricContract);
+  const constraints = constraintMetricSpecsForContract(metricContract);
+  const objectiveKeyItems = objectives.map((spec) =>
+    pythonSignedMetricValue(`metrics.${spec.name}`, spec.direction)
+  );
+  const guardrailItems = constraints.map((spec) => `metrics.${spec.name}`);
+  const violationLines = [];
+  for (const spec of constraints) {
+    if (typeof spec.max === "number") {
+      violationLines.push(
+        `    violation = max(violation, metrics.${spec.name} - ${pythonNumber(spec.max)})`
+      );
+    }
+    if (typeof spec.min === "number") {
+      violationLines.push(
+        `    violation = max(violation, ${pythonNumber(spec.min)} - metrics.${spec.name})`
+      );
+    }
+  }
+  if (violationLines.length === 0) {
+    violationLines.push("    violation = 0.0");
+  } else {
+    violationLines.unshift("    violation = 0.0");
+  }
+
+  const objectiveTuple = pythonTupleItems(objectiveKeyItems.length > 0 ? objectiveKeyItems : ["0.0"]);
+  const guardrailTuple = pythonTupleItems(guardrailItems);
+
+  return textBlock([
+    "def _selection_key(metrics: EpochMetrics) -> tuple[float, ...]:",
+    "    \"\"\"Rank epochs using the metric contract mirrored from session.json.\"\"\"",
+    ...violationLines,
+    `    objective_key = ${objectiveTuple}`,
+    `    guardrail_key = ${guardrailTuple}`,
+    "    if violation > 0.0:",
+    "        return (1.0, violation, *objective_key, *guardrail_key)",
+    "    return (0.0, *objective_key, *guardrail_key)",
+  ]).trimEnd();
+}
+
+function renderPythonSelectionImprovementFunction() {
+  return textBlock([
+    "def _is_selection_improvement(",
+    "    candidate: tuple[float, ...],",
+    "    current: tuple[float, ...] | None,",
+    "    *,",
+    "    min_delta: float,",
+    ") -> bool:",
+    "    if current is None:",
+    "        return True",
+    "    if candidate[0] != current[0]:",
+    "        return candidate[0] < current[0]",
+    "    if len(candidate) > 1 and candidate[1] < current[1] - min_delta:",
+    "        return True",
+    "    if len(candidate) > 1 and abs(candidate[1] - current[1]) <= min_delta:",
+    "        return candidate[2:] < current[2:]",
+    "    return False",
+  ]).trimEnd();
+}
+
+function pythonSignedMetricValue(expression, direction) {
+  return String(direction ?? "minimize") === "maximize" ? `-${expression}` : expression;
+}
+
+function pythonTupleItems(items) {
+  if (items.length === 0) return "()";
+  if (items.length === 1) return `(${items[0]},)`;
+  return `(${items.join(", ")})`;
+}
+
+function pythonNumber(value) {
+  if (!Number.isFinite(value)) {
+    throw new Error(`Cannot render non-finite numeric value: ${value}`);
+  }
+  return String(value);
+}
+
+function selectionMetricLabel(metricContract) {
+  const objectives = objectiveMetricSpecsForContract(metricContract).map((spec) => spec.name);
+  const constraints = constraintMetricSpecsForContract(metricContract).map((spec) => spec.name);
+  const objectivePart = objectives.length > 0 ? objectives.join("_then_") : "none";
+  const constraintPart = constraints.length > 0 ? `_with_${constraints.join("_and_")}_guardrails` : "";
+  return `${objectivePart}${constraintPart}`;
+}
+
+function ensureTrailingNewline(value) {
+  return value.endsWith("\n") ? value : `${value}\n`;
 }
 
 function normalizeSandboxConfig(value) {
@@ -1582,6 +2007,7 @@ function printHelp() {
   autoresearch restart [stack options]
   autoresearch session guide [session-dir] [guide options]
   autoresearch session add <session-dir> [--convex-url URL] [--dry-run]
+  autoresearch session sync-metric-contract <session-dir> [--dry-run]
   autoresearch session search <session> [query] [search options]
   autoresearch search <session> [query] [search options]
   autoresearch doctor
@@ -1636,11 +2062,13 @@ function printSessionHelp() {
   console.log(`Usage:
   autoresearch session guide [session-dir] [guide options]
   autoresearch session add <session-dir> [--convex-url URL] [--dry-run]
+  autoresearch session sync-metric-contract <session-dir> [--dry-run]
   autoresearch session search <session> [query] [search options]
 
 Session commands:
   guide       Print exact session folder setup and session.json guidance.
   add         Add or update a session from session.json through Convex.
+  sync        Rewrite local metric docs and benchmark selection from session.json.
   search      Search experiment results for a registered session.`);
 }
 
@@ -1681,6 +2109,20 @@ Adds or updates a session from <session-dir>/session.json.
 Options:
   --convex-url URL   Convex deployment URL. Defaults to CONVEX_URL, VITE_CONVEX_URL, or .env.local.
   --dry-run          Print the resolved payload without contacting Convex.`);
+}
+
+function printSessionSyncMetricContractHelp() {
+  console.log(`Usage:
+  autoresearch session sync-metric-contract <session-dir> [--dry-run]
+
+Rewrites local metric-facing files from <session-dir>/session.json:
+  goal.md
+  metric_contract.md
+  AGENTS.md
+  train.py, when it contains a recognizable _selection_key function
+
+Options:
+  --dry-run   Print the files that would be updated without writing them.`);
 }
 
 function printSessionSearchHelp() {

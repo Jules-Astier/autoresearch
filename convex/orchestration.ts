@@ -2,7 +2,10 @@ import { mutation, query } from "./_generated/server";
 import type { MutationCtx } from "./_generated/server";
 import type { Doc, Id } from "./_generated/dataModel";
 import { v } from "convex/values";
-import { promotionMilestoneIdsForSession } from "./promotionHistory";
+import {
+  promotionMilestoneIdsForDisplay,
+  promotionMilestoneIdsForSession,
+} from "./promotionHistory";
 
 const metricMap = v.record(v.string(), v.float64());
 const experimentSource = v.object({
@@ -23,11 +26,33 @@ const WORKER_CONTROL_KEY = "local";
 const DEFAULT_COMPUTE_BUDGET_SECONDS = 300;
 const PLANNING_CYCLE_STALE_MS = 30 * 60 * 1000;
 const RUN_STALE_MS = 30 * 60 * 1000;
+const SESSION_DELETE_BATCH_SIZE = 500;
 const ACTIVE_RUN_STATUSES = new Set(["claimed", "running"]);
 const TRANSIENT_AGENT_UNAVAILABLE = "transient_agent_unavailable";
 const QUOTA_EXHAUSTED = "quota_exhausted";
 const AUTH_CONFIG_ERROR = "auth/config_error";
 const AGENT_FAILED_TASK = "agent_failed_task";
+const GENERATED_BASELINE_PARTS = new Set([
+  ".autoresearch",
+  ".git",
+  "__pycache__",
+  "artifacts",
+  "data",
+  "dist",
+  "node_modules",
+]);
+const GENERATED_BASELINE_SUFFIXES = [
+  ".log",
+  ".parquet",
+  ".pt",
+  ".pyc",
+  ".sqlite",
+  ".tsbuildinfo",
+];
+const SENSITIVE_BASELINE_FILENAMES = new Set([
+  ".env",
+  "credentials.json",
+]);
 
 const createSessionArgs = {
   slug: v.string(),
@@ -48,6 +73,7 @@ const createSessionArgs = {
     workspacePath: v.string(),
     targetPath: v.string(),
   }))),
+  artifactContract: v.optional(v.any()),
   modelIoContract: v.optional(v.string()),
   agent: v.optional(v.any()),
   memory: v.optional(v.any()),
@@ -85,7 +111,7 @@ export const getSessionDetail = query({
       .query("researchEvents")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .order("desc")
-      .take(80);
+      .take(2000);
     const messages = await ctx.db
       .query("researchAgentMessages")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
@@ -119,15 +145,18 @@ export const getSessionDetail = query({
       .query("researchMemoryNotes")
       .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
       .collect();
-    const promotionMilestoneIds = promotionMilestoneIdsForSession(
+    const activeMemoryNotes = memoryNotes.filter((note) => note.status !== "rolled_back");
+    const promotionMilestoneIds = promotionMilestoneIdsForDisplay(
       session.metricContract,
       experiments.map((experiment) => ({
         id: String(experiment._id),
         ordinal: experiment.ordinal,
         status: experiment.status,
         metrics: experiment.metrics,
+        promoted: experiment.promoted,
         score: experiment.score,
       })),
+      events,
     );
 
     const activeRun =
@@ -159,7 +188,7 @@ export const getSessionDetail = query({
       artifacts,
       planningCycles,
       rollbacks,
-      memoryNotes,
+      memoryNotes: activeMemoryNotes,
       activeRun,
       activeLogs: activeLogs.reverse(),
     };
@@ -190,15 +219,22 @@ export const searchSessionResults = query({
       .query("researchExperiments")
       .withIndex("by_session_ordinal", (q) => q.eq("sessionId", session._id))
       .collect();
-    const promotionMilestoneIds = promotionMilestoneIdsForSession(
+    const events = await ctx.db
+      .query("researchEvents")
+      .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+      .order("desc")
+      .take(2000);
+    const promotionMilestoneIds = promotionMilestoneIdsForDisplay(
       session.metricContract,
       experiments.map((experiment) => ({
         id: String(experiment._id),
         ordinal: experiment.ordinal,
         status: experiment.status,
         metrics: experiment.metrics,
+        promoted: experiment.promoted,
         score: experiment.score,
       })),
+      events,
     );
 
     const queryText = String(args.text ?? "").trim().toLowerCase();
@@ -318,6 +354,7 @@ export const createResearchSession = mutation({
       immutablePaths: args.immutablePaths,
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
       workspaceLinks: args.workspaceLinks ?? [],
+      artifactContract: args.artifactContract,
       modelIoContract: args.modelIoContract,
       agent: args.agent,
       memory,
@@ -384,6 +421,7 @@ export const registerResearchSession = mutation({
         immutablePaths: args.immutablePaths,
         runtimeConfigPaths: args.runtimeConfigPaths ?? [],
         workspaceLinks: args.workspaceLinks ?? [],
+        artifactContract: args.artifactContract,
         modelIoContract: args.modelIoContract,
         agent: args.agent,
         memory,
@@ -417,6 +455,7 @@ export const registerResearchSession = mutation({
       immutablePaths: args.immutablePaths,
       runtimeConfigPaths: args.runtimeConfigPaths ?? [],
       workspaceLinks: args.workspaceLinks ?? [],
+      artifactContract: args.artifactContract,
       modelIoContract: args.modelIoContract,
       agent: args.agent,
       memory,
@@ -457,6 +496,7 @@ export const updateResearchSessionContract = mutation({
       workspacePath: v.string(),
       targetPath: v.string(),
     }))),
+    artifactContract: v.optional(v.any()),
     modelIoContract: v.optional(v.string()),
     agent: v.optional(v.any()),
     memory: v.optional(v.any()),
@@ -492,6 +532,8 @@ export const updateResearchSessionContract = mutation({
       patch.runtimeConfigPaths = args.runtimeConfigPaths;
     if (args.workspaceLinks !== undefined)
       patch.workspaceLinks = args.workspaceLinks;
+    if (args.artifactContract !== undefined)
+      patch.artifactContract = args.artifactContract;
     if (args.modelIoContract !== undefined)
       patch.modelIoContract = args.modelIoContract;
     if (args.agent !== undefined)
@@ -621,7 +663,9 @@ export const removeResearchSession = mutation({
 
     const deleted = await deleteSessionRecords(ctx, sessionId);
 
-    await ctx.db.delete(sessionId);
+    if (deleted.done) {
+      await ctx.db.delete(sessionId);
+    }
 
     return { deleted };
   },
@@ -633,6 +677,10 @@ export const restartResearchSession = mutation({
     await mustGetSession(ctx, sessionId);
 
     const deleted = await deleteSessionRecords(ctx, sessionId);
+    if (!deleted.done) {
+      return { deleted, restarted: false };
+    }
+
     const now = nowUtc();
 
     await ctx.db.patch(sessionId, {
@@ -654,7 +702,7 @@ export const restartResearchSession = mutation({
       updatedAtUtc: now,
     });
 
-    return { deleted };
+    return { deleted, restarted: true };
   },
 });
 
@@ -662,84 +710,122 @@ async function deleteSessionRecords(
   ctx: MutationCtx,
   sessionId: Id<"researchSessions">,
 ) {
-    const runLogs = await ctx.db
-      .query("researchRunLogs")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of runLogs) await ctx.db.delete(row._id);
+    const deleted = {
+      runLogs: 0,
+      agentMessages: 0,
+      agentUsage: 0,
+      events: 0,
+      memoryNotes: 0,
+      rollbacks: 0,
+      planningCycles: 0,
+      artifacts: 0,
+      patches: 0,
+      runs: 0,
+      experiments: 0,
+    };
+    let remaining = SESSION_DELETE_BATCH_SIZE;
+    let drained = true;
 
-    const agentMessages = await ctx.db
-      .query("researchAgentMessages")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of agentMessages) await ctx.db.delete(row._id);
+    const deleteRows = async (rows: Array<{ _id: Id<any> }>) => {
+      for (const row of rows) await ctx.db.delete(row._id);
+      remaining -= rows.length;
+      if (remaining === 0) {
+        drained = false;
+      }
+      return rows.length;
+    };
 
-    const agentUsage = await ctx.db
-      .query("researchAgentUsage")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of agentUsage) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const runLogs = await ctx.db
+        .query("researchRunLogs")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.runLogs += await deleteRows(runLogs);
+    }
 
-    const events = await ctx.db
-      .query("researchEvents")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of events) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const agentMessages = await ctx.db
+        .query("researchAgentMessages")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.agentMessages += await deleteRows(agentMessages);
+    }
 
-    const memoryNotes = await ctx.db
-      .query("researchMemoryNotes")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of memoryNotes) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const agentUsage = await ctx.db
+        .query("researchAgentUsage")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.agentUsage += await deleteRows(agentUsage);
+    }
 
-    const rollbacks = await ctx.db
-      .query("researchRollbacks")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of rollbacks) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const events = await ctx.db
+        .query("researchEvents")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.events += await deleteRows(events);
+    }
 
-    const planningCycles = await ctx.db
-      .query("researchPlanningCycles")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of planningCycles) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const memoryNotes = await ctx.db
+        .query("researchMemoryNotes")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.memoryNotes += await deleteRows(memoryNotes);
+    }
 
-    const artifacts = await ctx.db
-      .query("researchArtifacts")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of artifacts) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const rollbacks = await ctx.db
+        .query("researchRollbacks")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.rollbacks += await deleteRows(rollbacks);
+    }
 
-    const patches = await ctx.db
-      .query("researchPatches")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of patches) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const planningCycles = await ctx.db
+        .query("researchPlanningCycles")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.planningCycles += await deleteRows(planningCycles);
+    }
 
-    const runs = await ctx.db
-      .query("researchRuns")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of runs) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const artifacts = await ctx.db
+        .query("researchArtifacts")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.artifacts += await deleteRows(artifacts);
+    }
 
-    const experiments = await ctx.db
-      .query("researchExperiments")
-      .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
-      .collect();
-    for (const row of experiments) await ctx.db.delete(row._id);
+    if (remaining > 0) {
+      const patches = await ctx.db
+        .query("researchPatches")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.patches += await deleteRows(patches);
+    }
+
+    if (remaining > 0) {
+      const runs = await ctx.db
+        .query("researchRuns")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.runs += await deleteRows(runs);
+    }
+
+    if (remaining > 0) {
+      const experiments = await ctx.db
+        .query("researchExperiments")
+        .withIndex("by_session", (q) => q.eq("sessionId", sessionId))
+        .take(remaining);
+      deleted.experiments += await deleteRows(experiments);
+    }
 
     return {
-      runLogs: runLogs.length,
-      agentMessages: agentMessages.length,
-      agentUsage: agentUsage.length,
-      events: events.length,
-      memoryNotes: memoryNotes.length,
-      rollbacks: rollbacks.length,
-      planningCycles: planningCycles.length,
-      artifacts: artifacts.length,
-      patches: patches.length,
-      runs: runs.length,
-      experiments: experiments.length,
+      ...deleted,
+      done: drained,
     };
 }
 
@@ -891,6 +977,10 @@ export const claimPlanningCycle = mutation({
       .withIndex("by_session", (q) => q.eq("sessionId", session._id))
       .order("desc")
       .take(20);
+    const memoryNotes = await ctx.db
+      .query("researchMemoryNotes")
+      .withIndex("by_session", (q) => q.eq("sessionId", session._id))
+      .collect();
     await insertEvent(ctx, {
       sessionId: session._id,
       type: "planning.started",
@@ -905,6 +995,7 @@ export const claimPlanningCycle = mutation({
         .filter((item) => item.status !== "rolled_back")
         .sort((a, b) => a.ordinal - b.ordinal),
       patches,
+      memoryNotes: memoryNotes.filter((item) => item.status !== "rolled_back"),
     };
   },
 });
@@ -1138,8 +1229,11 @@ export const claimNextExperiment = mutation({
         .withIndex("by_session", (q) => q.eq("sessionId", session._id))
         .collect();
       const runNumber = await nextRunNumber(ctx, experiment._id);
-      const basePatch = session.basePatchId
+      const candidateBasePatch = session.basePatchId
         ? await ctx.db.get(session.basePatchId)
+        : null;
+      const basePatch = isReplayableBasePatch(session, candidateBasePatch)
+        ? candidateBasePatch
         : null;
       const runId = await ctx.db.insert("researchRuns", {
         sessionId: session._id,
@@ -1333,6 +1427,7 @@ export const recordMemoryNotes = mutation({
       const fields = {
         sessionId,
         path: note.path,
+        status: "active",
         kind: note.kind,
         content: note.content,
         entries: note.entries,
@@ -1340,9 +1435,15 @@ export const recordMemoryNotes = mutation({
         contentHash: note.contentHash,
         updatedAtUtc: now,
         updatedByRunId: runId,
+        invalidatedAtUtc: undefined,
+        invalidatedByRollbackId: undefined,
       };
       if (existing) {
-        if (existing.contentHash && existing.contentHash === note.contentHash) {
+        if (
+          existing.status !== "rolled_back" &&
+          existing.contentHash &&
+          existing.contentHash === note.contentHash
+        ) {
           continue;
         }
         await ctx.db.patch(existing._id, fields);
@@ -1928,12 +2029,43 @@ export const rollbackSession = mutation({
             (patch) =>
               patch.experimentId === target._id && patch.status === "accepted",
           )
+          .filter((patch) => isReplayableBasePatch(session, patch))
           .sort((a, b) => b.createdAtUtc.localeCompare(a.createdAtUtc))[0]
       : undefined;
     const nextOrdinal = Math.max(
       1,
       ...experiments.map((experiment) => experiment.ordinal + 1),
     );
+
+    const rollbackId = await ctx.db.insert("researchRollbacks", {
+      sessionId: args.sessionId,
+      fromExperimentOrdinal: experiments.length
+        ? Math.max(...experiments.map((experiment) => experiment.ordinal))
+        : undefined,
+      toExperimentOrdinal: target?.ordinal,
+      targetExperimentId: target?._id,
+      basePatchId: basePatch?._id,
+      rolledBackExperimentIds: rolledBackExperiments.map((experiment) => experiment._id),
+      rolledBackRunIds: rolledBackRuns.map((run) => run._id),
+      reason: args.reason,
+      createdAtUtc: now,
+    });
+
+    if (rolledBackRunIds.size > 0) {
+      const memoryNotes = await ctx.db
+        .query("researchMemoryNotes")
+        .withIndex("by_session", (q) => q.eq("sessionId", args.sessionId))
+        .collect();
+      for (const note of memoryNotes) {
+        if (note.updatedByRunId && rolledBackRunIds.has(note.updatedByRunId)) {
+          await ctx.db.patch(note._id, {
+            status: "rolled_back",
+            invalidatedAtUtc: now,
+            invalidatedByRollbackId: rollbackId,
+          });
+        }
+      }
+    }
 
     await ctx.db.patch(args.sessionId, {
       status: "running",
@@ -1951,20 +2083,6 @@ export const rollbackSession = mutation({
       rolledBackAtUtc: now,
       stoppedReason: "",
       updatedAtUtc: now,
-    });
-
-    const rollbackId = await ctx.db.insert("researchRollbacks", {
-      sessionId: args.sessionId,
-      fromExperimentOrdinal: experiments.length
-        ? Math.max(...experiments.map((experiment) => experiment.ordinal))
-        : undefined,
-      toExperimentOrdinal: target?.ordinal,
-      targetExperimentId: target?._id,
-      basePatchId: basePatch?._id,
-      rolledBackExperimentIds: rolledBackExperiments.map((experiment) => experiment._id),
-      rolledBackRunIds: rolledBackRuns.map((run) => run._id),
-      reason: args.reason,
-      createdAtUtc: now,
     });
 
     await insertEvent(ctx, {
@@ -3024,7 +3142,23 @@ async function applyMetricContractTransition(
     .withIndex("by_session", (q: any) => q.eq("sessionId", sessionId))
     .collect();
   const rescoredSession = { ...session, metricContract };
-  const best = bestExperimentForSession(rescoredSession, experiments);
+  const sourceExperiment = switchRecord.sourceExperimentId
+    ? experiments.find(
+        (experiment: Doc<"researchExperiments">) =>
+          String(experiment._id) === String(switchRecord.sourceExperimentId),
+      )
+    : undefined;
+  const sourceMetrics = sourceExperiment?.metrics;
+  const best =
+    sourceExperiment &&
+    sourceMetrics &&
+    constraintsPass(metricContract, sourceMetrics)
+      ? {
+          experiment: sourceExperiment,
+          score: scoreMetrics(metricContract, sourceMetrics),
+          metrics: sourceMetrics,
+        }
+      : bestExperimentForSession(rescoredSession, experiments);
   const promotionMilestoneIds = promotionMilestoneIdsForSession(
     metricContract,
     experiments.map((experiment: Doc<"researchExperiments">) => ({
@@ -3039,7 +3173,9 @@ async function applyMetricContractTransition(
 
   for (const experiment of experiments) {
     const shouldPromote =
-      experiment.promoted || promotionMilestoneIds.has(String(experiment._id));
+      experiment.promoted ||
+      (!switchRecord.sourceExperimentId &&
+        promotionMilestoneIds.has(String(experiment._id)));
     const nextScore = experiment.metrics
       ? scoreMetrics(metricContract, experiment.metrics)
       : undefined;
@@ -3242,6 +3378,79 @@ function compactFailureReason(reason: unknown): string | undefined {
     return undefined;
   }
   return text.length > 220 ? `${text.slice(0, 217)}...` : text;
+}
+
+function isReplayableBasePatch(
+  session: Doc<"researchSessions">,
+  patch: Doc<"researchPatches"> | null | undefined,
+): patch is Doc<"researchPatches"> {
+  if (!patch || patch.status !== "accepted" || patch.rejectionReason) {
+    return false;
+  }
+  const changedFiles = patch.changedFiles ?? [];
+  if (changedFiles.length === 0) {
+    return false;
+  }
+  return changedFiles.every(
+    (file) =>
+      isEditablePath(file, session.editablePaths) &&
+      !isGeneratedBaselinePath(file),
+  );
+}
+
+function isGeneratedBaselinePath(file: string): boolean {
+  const normalized = normalizeRelativePath(file);
+  const basename = normalized.split("/").at(-1) ?? normalized;
+  if (
+    SENSITIVE_BASELINE_FILENAMES.has(normalized) ||
+    SENSITIVE_BASELINE_FILENAMES.has(basename)
+  ) {
+    return true;
+  }
+  const parts = normalized.split("/");
+  if (parts.some((part) => GENERATED_BASELINE_PARTS.has(part))) {
+    return true;
+  }
+  return GENERATED_BASELINE_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
+}
+
+function normalizeRelativePath(value: string): string {
+  return String(value)
+    .replace(/^"|"$/g, "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+}
+
+function isEditablePath(file: string, editablePatterns: string[]): boolean {
+  const normalized = normalizeRelativePath(file);
+  return editablePatterns.some((pattern) =>
+    globMatch(normalized, normalizeRelativePath(pattern)),
+  );
+}
+
+function globMatch(file: string, pattern: string): boolean {
+  return new RegExp(`^${globToRegexSource(pattern)}$`).test(file);
+}
+
+function globToRegexSource(pattern: string): string {
+  let source = "";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    const next = pattern[index + 1];
+    const afterNext = pattern[index + 2];
+    if (char === "*" && next === "*" && afterNext === "/") {
+      source += "(?:.*/)?";
+      index += 2;
+    } else if (char === "*" && next === "*") {
+      source += ".*";
+      index += 1;
+    } else if (char === "*") {
+      source += "[^/]*";
+    } else {
+      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return source;
 }
 
 function bestExperimentForSession(

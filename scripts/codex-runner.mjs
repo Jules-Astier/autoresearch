@@ -337,6 +337,38 @@ async function runClaim(client, claim, args) {
     return;
   }
 
+  try {
+    await storeConfiguredArtifacts({
+      client,
+      session,
+      runId,
+      workspacePath
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await failRunAndRemember(client, {
+      runId,
+      session,
+      experiment,
+      workspacePath,
+      config: runnerConfig,
+      baseRef: patchBaseRef,
+      error: message.slice(0, 4000),
+      codexExitCode: agent.code,
+      benchmarkExitCode: benchmark.code,
+      summary: summaryText.slice(-4000),
+      patch: {
+        patchId: patchResult.patchId,
+        status: patchResult.status,
+        changedFiles: patch.changedFiles,
+        rejectedFiles: patch.rejectedFiles,
+        diffStat: patch.diffStat,
+        contentHash: patch.contentHash
+      }
+    });
+    return;
+  }
+
   const completion = await client.mutation(api.orchestration.completeRun, {
     runId,
     patchId: patchResult.patchId,
@@ -928,6 +960,7 @@ function buildArchitectureDiagramInstructions({ session, experiment, workspacePa
   return `- This architecture_change is allowed to modify the model architecture, so directly use ${MODEL_DIAGRAM_SKILL_NAME}; read ${MODEL_DIAGRAM_SKILL_PATH} before editing or creating the diagram source.
 - For the diagram work, create or update only the standalone TikZ \`.tex\` source for this same architecture change.
 - When the diagram uses math notation, include the required standard packages in the source, for example \`\\usepackage{amsfonts}\` or \`\\usepackage{amssymb}\` for \`\\mathbb\`.
+- When the diagram uses TikZ coordinate arithmetic such as \`($(node.south west)+(0mm,-15mm)$)\`, include \`\\usetikzlibrary{calc}\`.
 - Existing editable TikZ sources:
 ${sourceList}
 ${targetLine}
@@ -1845,6 +1878,113 @@ async function storeDiagramArtifacts({ client, session, experiment, runId, works
   return artifactIds;
 }
 
+export async function storeConfiguredArtifacts({ client, session, runId, workspacePath }) {
+  const contract = configuredArtifactContract(session);
+  if (contract.artifacts.length === 0) return [];
+
+  const artifactIds = [];
+  for (const spec of contract.artifacts) {
+    const required = spec.required ?? contract.required;
+    const absolutePath = safeResolveWorkspacePath(workspacePath, spec.path);
+    if (!fs.existsSync(absolutePath)) {
+      if (required) {
+        throw new Error(`configured artifact was not created: ${spec.path}`);
+      }
+      continue;
+    }
+    const stat = fs.statSync(absolutePath);
+    if (!stat.isFile()) {
+      if (required) {
+        throw new Error(`configured artifact is not a file: ${spec.path}`);
+      }
+      continue;
+    }
+    if (stat.size > MAX_ARTIFACT_BYTES) {
+      throw new Error(
+        `configured artifact is too large for Convex storage (${stat.size} bytes; max ${MAX_ARTIFACT_BYTES}): ${spec.path}`
+      );
+    }
+    const bytes = fs.readFileSync(absolutePath);
+    const contentHash = crypto.createHash("sha256").update(bytes).digest("hex");
+    const artifactId = await client.mutation(api.orchestration.recordResearchArtifact, {
+      runId,
+      kind: spec.kind,
+      sourcePath: spec.sourcePath ?? spec.path,
+      path: spec.path,
+      mimeType: spec.mimeType,
+      byteLength: bytes.byteLength,
+      bytes: bufferToArrayBuffer(bytes),
+      contentHash
+    });
+    artifactIds.push(artifactId);
+  }
+  return artifactIds;
+}
+
+function configuredArtifactContract(session) {
+  const raw = session?.artifactContract;
+  if (raw === undefined || raw === null) {
+    return { required: true, artifacts: [] };
+  }
+  const contract = Array.isArray(raw) ? { artifacts: raw } : raw;
+  if (!isPlainObject(contract)) {
+    throw new Error("artifactContract must be an object");
+  }
+  const artifacts = Array.isArray(contract.artifacts) ? contract.artifacts : [];
+  return {
+    required: contract.required !== false,
+    artifacts: artifacts.map((item, index) => configuredArtifactSpec(item, index))
+  };
+}
+
+function configuredArtifactSpec(item, index) {
+  if (!isPlainObject(item)) {
+    throw new Error(`artifactContract.artifacts[${index}] must be an object`);
+  }
+  const artifactPath = configuredArtifactPath(item.path, `artifactContract.artifacts[${index}].path`);
+  return {
+    path: artifactPath,
+    kind: configuredArtifactString(item.kind, "benchmark_artifact"),
+    sourcePath:
+      item.sourcePath === undefined || item.sourcePath === null || item.sourcePath === ""
+        ? undefined
+        : configuredArtifactPath(item.sourcePath, `artifactContract.artifacts[${index}].sourcePath`),
+    mimeType: configuredArtifactString(item.mimeType, mimeTypeFromArtifactPath(artifactPath)),
+    required: item.required === undefined ? undefined : item.required !== false
+  };
+}
+
+function configuredArtifactPath(value, field) {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new Error(`${field} must be a non-empty string`);
+  }
+  const normalized = normalizeRelativePath(value.trim()).replace(/\/+$/g, "");
+  if (
+    path.posix.isAbsolute(normalized) ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../") ||
+    normalized.includes("/../")
+  ) {
+    throw new Error(`${field} must be a relative path inside the workspace`);
+  }
+  return normalized;
+}
+
+function configuredArtifactString(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return String(value).trim();
+}
+
+function mimeTypeFromArtifactPath(value) {
+  const extension = path.posix.extname(value).toLowerCase();
+  if (extension === ".png") return "image/png";
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+  if (extension === ".webp") return "image/webp";
+  if (extension === ".svg") return "image/svg+xml";
+  return "application/octet-stream";
+}
+
 function requiresDiagramUpdate(session, experiment) {
   return isArchitectureChange(experiment);
 }
@@ -1922,11 +2062,21 @@ export function prepareTikzSourceForCompilation(sourceAbsolutePath, outputDir) {
   if (/\\mathbb\b/u.test(content) && !hasLatexPackage(content, ["amsfonts", "amssymb"])) {
     requiredPackages.push("amsfonts");
   }
-  if (requiredPackages.length === 0) {
+  const requiredTikzLibraries = [];
+  if (usesTikzCoordinateCalculation(content) && !hasTikzLibrary(content, "calc")) {
+    requiredTikzLibraries.push("calc");
+  }
+  if (requiredPackages.length === 0 && requiredTikzLibraries.length === 0) {
     return sourceAbsolutePath;
   }
 
-  const patched = insertLatexPackages(content, requiredPackages);
+  let patched = content;
+  if (requiredPackages.length > 0) {
+    patched = insertLatexPackages(patched, requiredPackages);
+  }
+  if (requiredTikzLibraries.length > 0) {
+    patched = insertTikzLibraries(patched, requiredTikzLibraries);
+  }
   const patchedPath = path.join(outputDir, path.basename(sourceAbsolutePath));
   fs.writeFileSync(patchedPath, patched, "utf8");
   return patchedPath;
@@ -1937,6 +2087,19 @@ function hasLatexPackage(content, packageNames) {
   for (const match of content.matchAll(/\\usepackage(?:\[[^\]]*\])?\{([^}]+)\}/gu)) {
     for (const packageName of match[1].split(",").map((item) => item.trim())) {
       if (wanted.has(packageName)) return true;
+    }
+  }
+  return false;
+}
+
+function usesTikzCoordinateCalculation(content) {
+  return /\$\([^$\n]*\)\s*[+-]\s*\([^$\n]*\)\$/u.test(content);
+}
+
+function hasTikzLibrary(content, libraryName) {
+  for (const match of content.matchAll(/\\usetikzlibrary\{([^}]+)\}/gsu)) {
+    for (const item of match[1].split(",").map((value) => value.trim())) {
+      if (item === libraryName) return true;
     }
   }
   return false;
@@ -1957,6 +2120,34 @@ function insertLatexPackages(content, packageNames) {
   }
   const insertAt = documentClassMatch.index + documentClassMatch[0].length;
   return `${content.slice(0, insertAt)}\n${packageLines}${content.slice(insertAt)}`;
+}
+
+function insertTikzLibraries(content, libraryNames) {
+  const libraryLine = `\\usetikzlibrary{${libraryNames.join(",")}}`;
+  const libraryMatches = [...content.matchAll(/\\usetikzlibrary\{([^}]+)\}/gsu)];
+  if (libraryMatches.length > 0) {
+    const last = libraryMatches.at(-1);
+    const libraries = last[1]
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const merged = [...new Set([...libraries, ...libraryNames])].join(",");
+    return `${content.slice(0, last.index)}\\usetikzlibrary{${merged}}${content.slice(last.index + last[0].length)}`;
+  }
+
+  const usePackageMatches = [...content.matchAll(/^\\usepackage(?:\[[^\]]*\])?\{[^}]+\}\s*$/gmu)];
+  if (usePackageMatches.length > 0) {
+    const last = usePackageMatches.at(-1);
+    const insertAt = last.index + last[0].length;
+    return `${content.slice(0, insertAt)}\n${libraryLine}${content.slice(insertAt)}`;
+  }
+
+  const documentClassMatch = content.match(/^\\documentclass(?:\[[^\]]*\])?\{[^}]+\}\s*$/mu);
+  if (!documentClassMatch) {
+    return `${libraryLine}\n${content}`;
+  }
+  const insertAt = documentClassMatch.index + documentClassMatch[0].length;
+  return `${content.slice(0, insertAt)}\n${libraryLine}${content.slice(insertAt)}`;
 }
 
 function convertPdfToSizedPng(pdfPath, tempDir) {
@@ -2056,7 +2247,10 @@ function shouldIncludePatchFile(workspacePath, file, session) {
 
 function isWorkspaceLink(file, links) {
   const normalized = normalizeRelativePath(file);
-  return normalizeWorkspaceLinks(links).some((link) => link.workspacePath === normalized);
+  return normalizeWorkspaceLinks(links).some((link) => {
+    const linkPath = link.workspacePath;
+    return normalized === linkPath || normalized.startsWith(`${linkPath}/`);
+  });
 }
 
 function isPatchOutputArtifact(file) {
