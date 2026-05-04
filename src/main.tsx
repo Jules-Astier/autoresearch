@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { AlertTriangle } from "lucide-react";
 import { ConvexProvider, ConvexReactClient } from "convex/react";
 import { LabLedger } from "./v2/LabLedger";
+import { DashboardEditor } from "./v2/DashboardEditor";
 import "./index.css";
 
 const convexUrl = import.meta.env.VITE_CONVEX_URL as string | undefined;
@@ -30,7 +31,9 @@ function MissingConvexConfig() {
 
 root.render(
   <React.StrictMode>
-    {convexUrl ? (
+    {window.location.pathname === "/edit" ? (
+      <DashboardEditor />
+    ) : convexUrl ? (
       <ConvexProvider client={new ConvexReactClient(convexUrl)}>
         <LabLedger />
       </ConvexProvider>

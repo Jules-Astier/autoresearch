@@ -63,16 +63,12 @@ export function promotionMilestoneIdsForDisplay(
     return promotionMilestoneIdsForSession(contract, candidates);
   }
 
-  const persistedMilestoneIds = new Set(
+  const milestoneIds = new Set(
     candidates
       .filter((candidate) => candidate.promoted)
       .map((candidate) => candidate.id),
   );
-  if (persistedMilestoneIds.size > 0) {
-    return persistedMilestoneIds;
-  }
 
-  const milestoneIds = new Set<string>();
   const switches = events
     .filter((event) => event?.type === "metric_policy.switched")
     .sort((a, b) =>

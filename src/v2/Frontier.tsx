@@ -11,9 +11,11 @@ import {
 import type { ExperimentLite } from "./lineageTree";
 import { experimentSourceCount } from "./sources";
 import {
+  buildFocusEras,
   buildMetricSeries,
-  metricFocusedAtOrdinal,
+  metricHasPositiveDomain,
   metricFocusedForSegment,
+  metricPromotedAtOrdinal,
   type FocusEra,
   type MetricSeriesOption,
 } from "./frontierSeries";
@@ -140,8 +142,14 @@ export function Frontier({ session, experiments, events = [], onSelectExperiment
   }, [allMetricOptions]);
 
   const focusEras = useMemo(
-    () => focusErasForSession({ events, experiments: graphExperiments, fallbackMetric: topObjective }),
-    [events, graphExperiments, topObjective],
+    () =>
+      buildFocusEras({
+        events,
+        experiments: graphExperiments,
+        fallbackMetric: topObjective,
+        metricContract: session?.metricContract,
+      }),
+    [events, graphExperiments, session?.metricContract, topObjective],
   );
 
   return (
@@ -244,15 +252,16 @@ function Chart({
     selectedMetricSet.has(metric.name),
   );
 
-  // log requires all positive values; if any are <= 0 we silently fall back
-  const overlayValues = selectedMetrics.flatMap((metricName) =>
-    points
-      .map((point) => point.metrics[metricName])
-      .filter((value): value is number => typeof value === "number" && Number.isFinite(value)),
-  );
-  const canLog = overlayValues.length > 0 && overlayValues.every((value) => value > 0);
+  const canLog = selectedMetrics.some((metricName) => metricHasPositiveDomain(metricName, points));
   const useLog = logScale && canLog;
-  const tx = (v: number) => (useLog ? Math.log10(v) : v);
+  const positiveLogFloor = useMemo(() => {
+    const positives = points
+      .flatMap((point) => selectedMetrics.map((metricName) => point.metrics[metricName]))
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0);
+    if (positives.length === 0) return 1;
+    return Math.min(...positives) / 10;
+  }, [points, selectedMetrics]);
+  const tx = (v: number) => (useLog ? Math.log10(v > 0 ? v : positiveLogFloor) : v);
   const metricDomains = useMemo(() => {
     const domains = new Map<string, { min: number; max: number; span: number }>();
     for (const metric of selectedMetricOptions) {
@@ -270,11 +279,11 @@ function Chart({
       });
     }
     return domains;
-  }, [points, selectedMetricOptions, useLog]);
+  }, [points, selectedMetricOptions, useLog, positiveLogFloor]);
 
   // bounds for shared-unit mode.
   const allValues = points
-    .flatMap((p) => selectedMetrics.map((name) => p.metrics[name]))
+    .flatMap((p) => selectedMetricOptions.map((metric) => p.metrics[metric.name]))
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
     .map(tx);
   const min = allValues.length > 0 ? Math.min(...allValues) : 0;
@@ -622,7 +631,13 @@ function Chart({
                   const value = p.metrics[series.name];
                   if (typeof value !== "number" || !Number.isFinite(value)) return null;
                   const promotedForMetric =
-                    p.promoted && metricFocusedAtOrdinal(series.name, p.ordinal, focusEras);
+                    metricPromotedAtOrdinal(
+                      series.name,
+                      p.ordinal,
+                      points,
+                      series.direction,
+                      focusEras,
+                    );
                   return (
                     <circle
                       key={series.name}
@@ -718,40 +733,4 @@ function metricColor(index: number): string {
     "#7b5ba7",
     "var(--sepia)",
   ][index % 5];
-}
-
-function focusErasForSession({
-  events,
-  experiments,
-  fallbackMetric,
-}: {
-  events: Array<any>;
-  experiments: ExperimentLite[];
-  fallbackMetric: string;
-}): FocusEra[] {
-  const firstOrdinal = experiments.length > 0 ? Math.min(...experiments.map((item) => item.ordinal)) : 0;
-  const byId = new Map(experiments.map((experiment) => [String(experiment._id), experiment]));
-  const switches = events
-    .filter((event) => event?.type === "metric_policy.switched")
-    .sort((a, b) => String(a.createdAtUtc ?? "").localeCompare(String(b.createdAtUtc ?? "")));
-  if (switches.length === 0) {
-    return fallbackMetric ? [{ metric: fallbackMetric, startOrdinal: firstOrdinal }] : [];
-  }
-  const eras: FocusEra[] = [];
-  const firstPayload = switches[0]?.payload ?? {};
-  if (typeof firstPayload.fromObjective === "string") {
-    eras.push({ metric: firstPayload.fromObjective, startOrdinal: firstOrdinal });
-  }
-  for (const event of switches) {
-    const payload = event?.payload ?? {};
-    if (typeof payload.toObjective !== "string") continue;
-    const sourceOrdinal = payload.sourceExperimentId
-      ? byId.get(String(payload.sourceExperimentId))?.ordinal
-      : undefined;
-    eras.push({
-      metric: payload.toObjective,
-      startOrdinal: sourceOrdinal ?? firstOrdinal,
-    });
-  }
-  return eras.length > 0 ? eras : fallbackMetric ? [{ metric: fallbackMetric, startOrdinal: firstOrdinal }] : [];
 }

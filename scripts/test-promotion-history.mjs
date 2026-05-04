@@ -141,7 +141,7 @@ try {
     ],
   );
 
-  assert.deepEqual([...persistedSwitchedIds], ["p1", "p2"]);
+  assert.deepEqual([...persistedSwitchedIds], ["p1", "p2", "p3"]);
 } finally {
   rmSync(outDir, { recursive: true, force: true });
 }
